@@ -110,7 +110,7 @@ def parse_awards_cell(cell: str) -> dict:
     - Only recognized awards and patterns are parsed; others are ignored.
     - Award codes and their mapping to output keys are defined in RANKED_AWARDS and ALL_NBA_POINTS.
     """
-    # Default resume values for all metrics we care about
+    # Default result values for all metrics we care about
     res = {
         "all_nba_team": np.nan,  # 1/2/3 or NaN
         "all_nba_points": 0,  # 3/2/1 or 0

@@ -79,7 +79,6 @@ def get_multi_season_base_and_advanced_stats(
 
     Notes
     -----
-    - If playoff data is unavailable for a season, only regular season stats are included for that year.
     - The function sleeps between API calls to avoid rate limiting.
     - The output DataFrame includes a "player_name_clean" column for consistent merging.
     - Columns from playoff stats are prefixed with "playoff_".
@@ -127,7 +126,7 @@ def get_multi_season_base_and_advanced_stats(
         # Filtering the regular season data to only include players with enough minutes
         regular_df = regular_df[regular_df["MIN"] >= min_minutes]
 
-        # === Playoffs Data Pull (Base Only) ===
+        # === Playoffs Data Pull ===
         try:
             time.sleep(1)
             playoff_base = leaguedashplayerstats.LeagueDashPlayerStats(
@@ -139,7 +138,7 @@ def get_multi_season_base_and_advanced_stats(
             time.sleep(1)
             playoff_adv = leaguedashplayerstats.LeagueDashPlayerStats(
                 season=season_str,
-                season_type_all_star="Regular Season",
+                season_type_all_star="Playoffs",
                 measure_type_detailed_defense="Advanced",
             ).get_data_frames()[0]
 
