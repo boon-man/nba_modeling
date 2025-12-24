@@ -1,0 +1,12 @@
+pandas
+numpy
+unicodedata2
+nba_api
+scikit-learn
+xgboost
+hyperopt
+plotnine
+requests
+beautifulsoup4
+setuptools
+lxml
