@@ -183,6 +183,101 @@ def calculate_fantasy_points(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Function to track player's "productivity scores" how productive are they relative to their age?
+def calculate_productivity_score(
+    df: pd.DataFrame,
+    fantasy_points_col: str = "fantasy_points",
+    age_col: str = "Age",
+    output_col: str = "productivity_score",
+) -> pd.DataFrame:
+    """
+    Calculate productivity score features based on player age and fantasy points.
+
+    Creates three productivity metrics:
+    1. Adjusted productivity: fantasy_points / (age^2)
+    2. Productivity trend: change from previous season
+    3. 3-year rolling average productivity
+
+    This helps identify players performing above/below their career arc.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe containing player season data.
+    fantasy_points_col : str, default 'fantasy_points'
+        Column name containing fantasy points.
+    age_col : str, default 'Age'
+        Column name containing player age.
+    output_col : str, default 'productivity_score'
+        Base name for output columns (suffixes added for trend and 3yr).
+
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with three new columns:
+        - 'productivity_score': fantasy_points / (age^2)
+        - 'productivity_trend': change from previous season
+        - 'productivity_3yr': 3-year rolling average
+
+    Notes
+    -----
+    Productivity score higher values indicate better efficiency relative to age.
+    Trend can be positive (improving) or negative (declining).
+    """
+    df = df.copy()
+
+    # Sort by player and year to ensure correct grouped operations
+    df = df.sort_values(by=["player_id", "year"]).reset_index(drop=True)
+
+    # Calculate age squared
+    df["age_squared"] = df[age_col] ** 2
+
+    # Create adjusted productivity score (points / age^2)
+    df[output_col] = df[fantasy_points_col] / df["age_squared"]
+
+    # Calculate productivity trend (change from previous season)
+    # Group by player ID to ensure we're comparing within-player seasons
+    df["productivity_trend"] = df.groupby("player_id")[output_col].diff()
+
+    # Calculate 3-year rolling average productivity
+    df["productivity_3yr"] = df.groupby("player_id")[output_col].transform(
+        lambda x: x.rolling(window=3, min_periods=1).mean()
+    )
+
+    # Drop the temporary age_squared column
+    df = df.drop(columns=["age_squared"])
+
+    # Fill NaN values in trend with 0 (no change for first season)
+    df["productivity_trend"] = df["productivity_trend"].fillna(0)
+
+    return df
+
+
+# Function to add "years since peak" feature to dataset
+def calculate_years_since_peak(
+    df: pd.DataFrame,
+    player_col="player_name_clean",
+    year_col="year",
+    value_col="fantasy_points",
+    output_col="years_since_peak",
+) -> pd.DataFrame:
+    """
+    Adds a column indicating how many years it has been since each player's peak season (by value_col).
+    The peak is defined as the season with the maximum value_col for each player.
+    """
+    df = df.copy()
+    # Find the peak year for each player
+    peak_years = df.groupby(player_col)[[value_col, year_col]].apply(
+        lambda g: g.loc[g[value_col].idxmax(), year_col]
+    )
+    # Map peak year to each row
+    df["peak_year"] = df[player_col].map(peak_years)
+    # Calculate years since peak
+    df[output_col] = df[year_col] - df["peak_year"]
+    # If future seasons, years_since_peak will be negative; set to 0 for peak year, positive for after, negative for before
+    return df.drop(columns=["peak_year"])
+
+
 def rolling_trend(feature, years, window=3):
     """
     Compute a rolling career trajectory metric for win shares over a specified window of seasons.
