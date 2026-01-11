@@ -2,6 +2,18 @@
 # Configuration file for NBA player performance prediction model
 ##################################################
 
+# Setting roster size & league size parameters
+ROSTER_SIZE = 16
+LEAGUE_SIZE = 12
+# Defining bonus player pool size for draft board
+BONUS_PLAYER_POOL_MULT = 1.15
+
+# Defining positional roster allocations
+G_SPLIT = 0.4
+W_SPLIT = 0.4
+B_SPLIT = 0.2
+
+
 # Defining URL for pulling NBA projections
 FANTASYPROS_URL = "https://www.fantasypros.com/nba/stats/overall.php"
 

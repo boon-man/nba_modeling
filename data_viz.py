@@ -127,7 +127,7 @@ def plot_feature_importance(
 
     p = (
         ggplot(df_top, aes(x="reorder(feature, rel_importance)", y="rel_importance"))
-        + geom_col(fill="#6baed6", alpha=0.9)
+        + geom_col(fill="#6baed6", alpha=0.9, width=0.7)
         + coord_flip()
         + labs(
             title="Feature Importance (XGBoost)",
