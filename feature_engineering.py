@@ -247,9 +247,6 @@ def calculate_productivity_score(
     # Drop the temporary age_squared column
     df = df.drop(columns=["age_squared"])
 
-    # Fill NaN values in trend with 0 (no change for first season)
-    df["productivity_trend"] = df["productivity_trend"].fillna(0)
-
     return df
 
 
@@ -339,12 +336,30 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
         for c in CORE_STATS
         if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
     ]
-    df[stats] = df[stats].fillna(0)
     df["year"] = df["year"].astype(int)
 
     # Sort & group
     df = df.sort_values(["player_name_clean", "year"])
     g = df.groupby("player_name_clean", sort=False)
+
+    # Seasons played prior (0 for rookie season row)
+    seasons_prior = g.cumcount()
+
+    # Window coverage counts (how many seasons included in the avg3yr window)
+    seasons_in_3 = (
+        g["year"]
+        .rolling(window=3, min_periods=1)
+        .count()
+        .reset_index(level=0, drop=True)
+        .astype(int)
+    )
+    seasons_in_6 = (
+        g["year"]
+        .rolling(window=6, min_periods=1)
+        .count()
+        .reset_index(level=0, drop=True)
+        .astype(int)
+    )
 
     # Career cumulative totals (up to current row)
     career = g[stats].cumsum().add_prefix("career_")
@@ -401,16 +416,22 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
     trends.index = trends.index.droplevel(0)  # Remove groupby level to match df index
 
     # year-over-year deltas for all stats at once
-    deltas = g[stats].diff().fillna(0)
+    deltas = g[stats].diff()
     deltas.columns = [f"{c}_delta" for c in deltas.columns]
 
     # Capturing each player's fantasy points in the prior season
     # Helpful for modeling improvement or decline
-    deltas["fantasy_points_prior"] = g["fantasy_points"].shift(1).fillna(0)
+    deltas["fantasy_points_prior"] = g["fantasy_points"].shift(1)
 
     # Capturing each player's fantasy points in the following season
     # This will be used as the target variable for modeling
-    deltas["fantasy_points_future"] = g["fantasy_points"].shift(-1).fillna(0)
+    deltas["fantasy_points_future"] = g["fantasy_points"].shift(-1)
+
+    out = pd.concat([df, career, rolling_avgs, trends, deltas], axis=1)
+
+    out["seasons_prior"] = seasons_prior.values
+    out["seasons_in_3yr_window"] = seasons_in_3.values
+    out["seasons_in_6yr_window"] = seasons_in_6.values
 
     # attach new metrics onto original dataframe
-    return pd.concat([df, career, rolling_avgs, trends, deltas], axis=1)
+    return out

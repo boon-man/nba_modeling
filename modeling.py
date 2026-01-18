@@ -211,107 +211,119 @@ def tune_xgb_nba(
     y_train: pd.Series,
     y_val: pd.Series,
     space: dict,
-    metric: str = "rmse",
-    alpha: float = 1.5,
-    evals: int = 60,
+    metric: str = "asymmetric",
+    evals: int = 75,
     random_state: int = 62820,
-    max_depth_choices: list = None,
-):
+) -> dict:
     """
-    Tune XGBoost hyperparameters using Hyperopt with early stopping on a validation set.
+    Performs hyperparameter optimization for an XGBoost regressor using Hyperopt.
+
+    This function tunes XGBoost model hyperparameters by minimizing a specified loss metric
+    (RMSE, MAE, or an asymmetric loss) on the validation set. The search is performed using
+    the Hyperopt library and the Tree of Parzen Estimators (TPE) algorithm. The function
+    returns the best set of hyperparameters found.
 
     Parameters
     ----------
     X_train : pd.DataFrame
-        Training feature matrix.
+        Training predictors.
     X_val : pd.DataFrame
-        Validation feature matrix.
+        Validation predictors.
     y_train : pd.Series
-        Training target vector.
+        Training target.
     y_val : pd.Series
-        Validation target vector.
+        Validation target.
     space : dict
-        Hyperopt search space for XGBoost hyperparameters.
-    metric : str, default "rmse"
-        Optimization metric: "rmse", "mae", or "asymmetric".
+        Hyperparameter search space for Hyperopt.
+    metric : str, default "asymmetric"
+        Metric to optimize ("rmse", "mae", or "asymmetric").
     alpha : float, default 1.5
-        Asymmetry parameter for custom loss (used if metric="asymmetric").
-    evals : int, default 60
-        Number of Hyperopt trials (max_evals).
+        Penalty multiplier for under-predictions in the asymmetric loss.
+    evals : int, default 75
+        Number of Hyperopt evaluations.
     random_state : int, default 62820
         Random seed for reproducibility.
 
     Returns
     -------
     best_params : dict
-        Dictionary of best hyperparameters found by Hyperopt.
-
-    Notes
-    -----
-    - Uses early stopping on the validation set for each trial.
-    - Supports RMSE, MAE, or a custom asymmetric loss for optimization.
-    - Prints the best hyperparameters found.
-    - Assumes categorical features are handled appropriately in X_train/X_val.
+        Dictionary of the best hyperparameters found.
     """
-
-    def asymmetric_loss(y_true, y_pred, alpha=1.5):
-        residuals = y_true - y_pred
-        loss = np.where(residuals > 0, alpha * (residuals**2), residuals**2)
-        return np.mean(loss)
 
     def objective(params):
         model = XGBRegressor(
             objective="reg:squarederror",
             learning_rate=float(params["learning_rate"]),
-            max_depth=int(params["max_depth"]),
+            # leaf-based tree growth
+            grow_policy="lossguide",
+            max_leaves=int(params["max_leaves"]),
             subsample=float(params["subsample"]),
             colsample_bytree=float(params["colsample_bytree"]),
-            colsample_bynode=float(params["colsample_bynode"]),
             min_child_weight=float(params["min_child_weight"]),
             reg_lambda=float(params["reg_lambda"]),
             reg_alpha=float(params["reg_alpha"]),
             gamma=float(params["gamma"]),
-            n_estimators=2000,
+            enable_categorical=True,
+            n_estimators=5000,
             random_state=random_state,
             n_jobs=-1,
             tree_method="hist",
-            enable_categorical=True,
             eval_metric="rmse",
             early_stopping_rounds=100,
         )
 
-        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+        model.fit(
+            X_train, y_train, eval_set=[(X_val, y_val)], verbose=False
+        )  # noqa: F821
         y_pred = model.predict(X_val)
 
+        # --- compute all metrics for visibility ---
+        rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
+        mae = float(mean_absolute_error(y_val, y_pred))
+
+        # --- choose the one to optimize ---
         if metric == "rmse":
-            loss = float(np.sqrt(mean_squared_error(y_val, y_pred)))
+            loss = rmse
         elif metric == "mae":
-            loss = float(mean_absolute_error(y_val, y_pred))
-        elif metric == "asymmetric":
-            loss = float(asymmetric_loss(y_val, y_pred, alpha=alpha))
+            loss = mae
         else:
             raise ValueError(f"Unknown metric: {metric}")
 
-        return {"loss": loss, "status": STATUS_OK}
+        # Hyperopt will store this in trials; handy for later analysis
+        return {
+            "loss": loss,
+            "status": STATUS_OK,
+            "rmse": rmse,
+            "mae": mae,
+            "best_iteration": getattr(model, "best_iteration", None),
+        }
 
     trials = Trials()
-    best_params = fmin(
+    best = fmin(
         fn=objective, space=space, algo=tpe.suggest, max_evals=evals, trials=trials
     )
 
     best_params = {
-        "learning_rate": float(best_params["learning_rate"]),
-        "max_depth": int(max_depth_choices[best_params["max_depth"]]),
-        "subsample": float(best_params["subsample"]),
-        "colsample_bytree": float(best_params["colsample_bytree"]),
-        "colsample_bynode": float(best_params["colsample_bynode"]),
-        "min_child_weight": float(best_params["min_child_weight"]),
-        "reg_lambda": float(best_params["reg_lambda"]),
-        "reg_alpha": float(best_params["reg_alpha"]),
-        "gamma": float(best_params["gamma"]),
+        "learning_rate": float(best["learning_rate"]),
+        "max_leaves": int(best["max_leaves"]),
+        "grow_policy": "lossguide",
+        "subsample": float(best["subsample"]),
+        "colsample_bytree": float(best["colsample_bytree"]),
+        "min_child_weight": float(best["min_child_weight"]),
+        "reg_lambda": float(best["reg_lambda"]),
+        "reg_alpha": float(best["reg_alpha"]),
+        "gamma": float(best["gamma"]),
     }
 
+    # print the best trial's metrics
+    best_trial = trials.best_trial["result"]
     print("Best Parameters:", best_params)
+    print(
+        f"[Best trial @ val] optimized={metric} "
+        f"| RMSE={best_trial.get('rmse', float('nan')):.3f} "
+        f"| MAE={best_trial.get('mae', float('nan')):.3f} "
+    )
+
     return best_params
 
 
@@ -367,32 +379,37 @@ def create_model_nba(
     model = XGBRegressor(
         objective="reg:squarederror",
         **final_params,
-        n_estimators=2000,
+        enable_categorical=True,
+        n_estimators=5000,
         random_state=random_state,
         n_jobs=-1,
         tree_method="hist",
-        enable_categorical=True,
         eval_metric="rmse",
-        early_stopping_rounds=50,
+        early_stopping_rounds=100,
     )
 
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
 
-    # Helpful diagnostic: where early stopping landed
     if hasattr(model, "best_iteration") and model.best_iteration is not None:
         print(f"Best iteration: {model.best_iteration}")
 
-    final_pred = model.predict(X_test)
+    # --- Validation metrics (optional but useful) ---
+    val_pred = model.predict(X_val)
+    val_rmse = np.sqrt(mean_squared_error(y_val, val_pred))
+    val_mae = mean_absolute_error(y_val, val_pred)
+    val_r2 = r2_score(y_val, val_pred)
 
-    rmse = np.sqrt(mean_squared_error(y_test, final_pred))
-    mae = mean_absolute_error(y_test, final_pred)
-    r2 = r2_score(y_test, final_pred)
+    print(f"[Val] RMSE: {val_rmse:.3f} | MAE: {val_mae:.3f} | R^2: {val_r2:.3f}")
 
-    print(f"[Final tuned] RMSE: {rmse:.3f}")
-    print(f"[Final tuned] MAE:  {mae:.3f}")
-    print(f"[Final tuned] R^2:  {r2:.3f}")
+    # --- Test metrics ---
+    test_pred = model.predict(X_test)
+    test_rmse = np.sqrt(mean_squared_error(y_test, test_pred))
+    test_mae = mean_absolute_error(y_test, test_pred)
+    test_r2 = r2_score(y_test, test_pred)
 
-    return model, final_pred
+    print(f"[Test] RMSE: {test_rmse:.3f} | MAE: {test_mae:.3f} | R^2: {test_r2:.3f}")
+
+    return model, test_pred
 
 
 def build_prediction_frame(
