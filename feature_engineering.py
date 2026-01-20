@@ -5,6 +5,59 @@ import re
 from config import ALL_NBA_POINTS, RANKED_AWARDS
 
 
+# Function to add era feature based on season year
+def add_era_feature(
+    df: pd.DataFrame,
+    *,
+    year_col: str = "year",
+    era_col: str = "era",
+) -> pd.DataFrame:
+    """
+    Add an era categorical feature based on season year using explicit sequential comparisons.
+
+    Buckets (editable):
+      - year <= 2004: early_00s
+      - year <= 2009: late_00s
+      - year <= 2014: early_10s
+      - year <= 2019: late_10s
+      - year <= 2024: early_20s
+      - else:         late_20s_plus
+    """
+    out = df.copy()
+    y = out[year_col].astype(int)
+
+    era = np.where(
+        y <= 2004,
+        "early_00s",
+        np.where(
+            y <= 2009,
+            "late_00s",
+            np.where(
+                y <= 2014,
+                "early_10s",
+                np.where(
+                    y <= 2019, "late_10s", np.where(y <= 2024, "early_20s", "late_20s")
+                ),
+            ),
+        ),
+    )
+
+    out[era_col] = pd.Categorical(
+        era,
+        categories=[
+            "early_00s",
+            "late_00s",
+            "early_10s",
+            "late_10s",
+            "early_20s",
+            "late_20s_plus",
+        ],
+        ordered=True,
+    )
+
+    return out
+
+
 def expand_awards(
     df, player_col="player_name_clean", year_col="year", awards_col="Awards"
 ):
@@ -175,10 +228,15 @@ def calculate_fantasy_points(df: pd.DataFrame) -> pd.DataFrame:
         + df["blk"] * 3
         - df["tov"] * 1
     )
-
-    df["fantasy_points_rank"] = df.groupby("year")["fantasy_points"].rank(
-        method="min", ascending=False
+    # Ranking players by fantasy points within each season (percentile rank)
+    df["fantasy_points_pct"] = (
+        df.groupby("year")["fantasy_points"]
+        .rank(pct=True, ascending=True)
+        .astype(float)
     )
+
+    # Calculating fantasy points per minute played
+    df["fpts_per_min"] = df["fantasy_points"] / df["mp"].replace(0, np.nan)
 
     return df
 
@@ -253,26 +311,41 @@ def calculate_productivity_score(
 # Function to add "years since peak" feature to dataset
 def calculate_years_since_peak(
     df: pd.DataFrame,
-    player_col="player_name_clean",
-    year_col="year",
-    value_col="fantasy_points",
-    output_col="years_since_peak",
+    player_col: str = "player_name_clean",
+    year_col: str = "year",
 ) -> pd.DataFrame:
     """
-    Adds a column indicating how many years it has been since each player's peak season (by value_col).
-    The peak is defined as the season with the maximum value_col for each player.
+    Add peak-timing features based on each player's peak fantasy points season.
+
+    Adds:
+      - years_before_peak: max(peak_year - year, 0)
+      - years_after_peak:  max(year - peak_year, 0)
+
+    Notes
+    -----
+    - Peak season is defined as the season with maximum `fantasy_points` for each player.
+    - This avoids a single signed feature (years_since_peak) that goes negative for pre-peak players.
     """
-    df = df.copy()
-    # Find the peak year for each player
-    peak_years = df.groupby(player_col)[[value_col, year_col]].apply(
-        lambda g: g.loc[g[value_col].idxmax(), year_col]
-    )
-    # Map peak year to each row
-    df["peak_year"] = df[player_col].map(peak_years)
-    # Calculate years since peak
-    df[output_col] = df[year_col] - df["peak_year"]
-    # If future seasons, years_since_peak will be negative; set to 0 for peak year, positive for after, negative for before
-    return df.drop(columns=["peak_year"])
+    out = df.copy()
+    out[year_col] = out[year_col].astype(int)
+
+    if "fantasy_points" not in out.columns:
+        raise ValueError(
+            "calculate_years_since_peak requires a 'fantasy_points' column on df."
+        )
+
+    # Peak year per player (row index of max fantasy_points within player)
+    peak_idx = out.groupby(player_col, sort=False)["fantasy_points"].idxmax()
+    peak_year_by_player = out.loc[peak_idx, [player_col, year_col]].set_index(
+        player_col
+    )[year_col]
+
+    peak_year = out[player_col].map(peak_year_by_player).astype("Int64")
+
+    out["years_before_peak"] = (peak_year - out[year_col]).clip(lower=0).astype(int)
+    out["years_after_peak"] = (out[year_col] - peak_year).clip(lower=0).astype(int)
+
+    return out
 
 
 def rolling_trend(feature, years, window=3):
@@ -288,17 +361,28 @@ def rolling_trend(feature, years, window=3):
     np.ndarray
         Array of shape (len(feature),) with the trajectory metric for each window.
     """
-    trends = np.zeros(len(feature))
+    feature = np.asarray(feature, dtype=float)
+    years = np.asarray(years, dtype=float)
+
+    trends = np.full(len(feature), np.nan, dtype=float)
+    # Require full history for short windows; allow >=3 seasons for longer windows (e.g., 6yr)
+    min_seasons = window if window <= 3 else 3
+
     for i in range(len(feature)):
         start = max(0, i - window + 1)
         y = feature[start : i + 1]
         x = years[start : i + 1]
-        if len(y) > 2:
-            x_centered = x - np.mean(x)
-            coefs = np.polyfit(x_centered, y, 2)  # [quad, linear, intercept]
-            trends[i] = coefs[1] + 0.5 * coefs[0]
-        else:
-            trends[i] = 0.0
+
+        if len(y) < min_seasons:
+            continue
+
+        if np.isnan(y).any() or np.isnan(x).any():
+            continue
+
+        # Fit quadratic trend (needs >= 3 points; enforced via min_points)
+        x_centered = x - np.mean(x)
+        coefs = np.polyfit(x_centered, y, 2)  # [quad, linear, intercept]
+        trends[i] = coefs[1] + 0.5 * coefs[0]
     return trends
 
 
@@ -391,6 +475,61 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
         .add_prefix("avg3yr_")
     )
 
+    # Player tiering: BPM-based role bucket (3yr avg)
+    def _bpm_tier(bpm: float) -> str:
+        if pd.isna(bpm):
+            return "unknown"
+        if bpm >= 5.0:
+            return "superstar"
+        if bpm >= 3.0:
+            return "star"
+        if bpm >= 1.5:
+            return "starter_plus"
+        if bpm >= -0.5:
+            return "rotation"
+        return "bench"
+
+    bpm_tier = rolling_avgs["avg3yr_bpm"].apply(_bpm_tier)
+    rolling_avgs["player_tier"] = bpm_tier.astype("category")
+
+    # Calculating total minutes played and games played in the past 3 years
+    sum_cols = [
+        c
+        for c in ["mp", "gp", "fantasy_points"]
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    # flagging missing accumulation stats as 0 (missing games played corresponds to 0 games played)
+    df[sum_cols] = df[sum_cols].fillna(0)
+    rolling_sums_3yr = (
+        g[sum_cols]
+        .rolling(window=3, min_periods=1)
+        .sum()
+        .reset_index(level=0, drop=True)
+        .add_prefix("sum3yr_")
+    )
+    rolling_sums_6yr = (
+        g[sum_cols]
+        .rolling(window=6, min_periods=1)
+        .sum()
+        .reset_index(level=0, drop=True)
+        .add_prefix("sum6yr_")
+    )
+
+    # Derived rate features (minutes-weighted)
+    rolling_sums_3yr["fpts_per_min_3yr"] = rolling_sums_3yr[
+        "sum3yr_fantasy_points"
+    ] / rolling_sums_3yr["sum3yr_mp"].replace(0, np.nan)
+    rolling_sums_6yr["fpts_per_min_6yr"] = rolling_sums_6yr[
+        "sum6yr_fantasy_points"
+    ] / rolling_sums_6yr["sum6yr_mp"].replace(0, np.nan)
+
+    rolling_sums_3yr["min_pg_equiv_3yr"] = rolling_sums_3yr[
+        "sum3yr_mp"
+    ] / rolling_sums_3yr["sum3yr_gp"].replace(0, np.nan)
+    rolling_sums_6yr["min_pg_equiv_6yr"] = rolling_sums_6yr[
+        "sum6yr_mp"
+    ] / rolling_sums_6yr["sum6yr_gp"].replace(0, np.nan)
+
     # Process to track a player's recent & long term career arcs via win share trends over the past 3 + 6 seasons
     # Using a blended linear & quadratic fit to capture upwards/downward trajectory + acceleration/deceleration in performance
     trends = g.apply(
@@ -427,7 +566,10 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
     # This will be used as the target variable for modeling
     deltas["fantasy_points_future"] = g["fantasy_points"].shift(-1)
 
-    out = pd.concat([df, career, rolling_avgs, trends, deltas], axis=1)
+    out = pd.concat(
+        [df, career, rolling_avgs, rolling_sums_3yr, rolling_sums_6yr, trends, deltas],
+        axis=1,
+    )
 
     out["seasons_prior"] = seasons_prior.values
     out["seasons_in_3yr_window"] = seasons_in_3.values
