@@ -179,10 +179,11 @@ def attach_model_results(
             "player_name_clean",
             "season",
             "year",
+            "age",
             "fantasy_points",
+            "prediction_diff",
             "fantasy_points_future",
             "predicted_fantasy_points",
-            "prediction_diff",
         ]
 
     results = X_test.copy()
@@ -190,7 +191,8 @@ def attach_model_results(
 
     # Join player/season info from source DataFrame using index alignment
     results = results.join(
-        source_df[["player_name_clean", "season", "fantasy_points_future"]], how="left"
+        source_df[["player_name_clean", "season", "fantasy_points_future"]],
+        how="left",
     )
 
     # Calculate prediction difference
@@ -264,7 +266,7 @@ def tune_xgb_nba(
             reg_alpha=float(params["reg_alpha"]),
             gamma=float(params["gamma"]),
             enable_categorical=True,
-            n_estimators=5000,
+            n_estimators=3000,
             random_state=random_state,
             n_jobs=-1,
             tree_method="hist",

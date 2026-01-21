@@ -5,6 +5,88 @@ import re
 from config import ALL_NBA_POINTS, RANKED_AWARDS
 
 
+# Function to bin colleges based on number of NBA players produced
+def bin_college(
+    df: pd.DataFrame,
+    college_col: str = "college",
+    player_col: str = "player_name_clean",
+    pipeline_threshold: int = 10,
+    notable_threshold: int = 3,
+) -> pd.DataFrame:
+    """
+    Bin colleges based on empirical NBA player counts from the data.
+
+    Categories:
+    - 'no_college': International/no college players
+    - 'nba_pipeline': Schools with > pipeline_threshold unique NBA players
+    - 'notable': Schools with > notable_threshold (but <= pipeline_threshold) players
+    - 'other': Schools with <= notable_threshold players
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with college and player columns.
+    college_col : str
+        Name of the college column.
+    player_col : str
+        Name of the player identifier column.
+    pipeline_threshold : int, default 10
+        Minimum unique players to qualify as 'nba_pipeline'.
+    notable_threshold : int, default 3
+        Minimum unique players to qualify as 'notable'.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with additional 'college_bin' column.
+    """
+    out = df.copy()
+
+    # Count unique players per college
+    college_counts = (
+        out.groupby(college_col, observed=True)[player_col]
+        .nunique()
+        .reset_index(name="player_count")
+    )
+
+    # Create bin mapping
+    def assign_bin(row):
+        college = row[college_col]
+        count = row["player_count"]
+
+        # Handle no college / international
+        if pd.isna(college) or str(college).strip().upper() in (
+            "NO COLLEGE",
+            "NONE",
+            "",
+        ):
+            return "no_college"
+
+        if count > pipeline_threshold:
+            return "nba_pipeline"
+        elif count > notable_threshold:
+            return "notable"
+        else:
+            return "other"
+
+    college_counts["college_bin"] = college_counts.apply(assign_bin, axis=1)
+
+    # Merge back to original dataframe
+    bin_map = college_counts.set_index(college_col)["college_bin"].to_dict()
+
+    # Handle no college explicitly
+    out["college_bin"] = out[college_col].map(bin_map)
+    out.loc[
+        out[college_col].isna()
+        | (out[college_col].astype(str).str.upper().isin(["NO COLLEGE", "NONE", ""])),
+        "college_bin",
+    ] = "no_college"
+
+    out["college_bin"] = out["college_bin"].astype("category")
+
+    return out
+
+
 # Function to add era feature based on season year
 def add_era_feature(
     df: pd.DataFrame,
@@ -320,6 +402,7 @@ def calculate_years_since_peak(
     Adds:
       - years_before_peak: max(peak_year - year, 0)
       - years_after_peak:  max(year - peak_year, 0)
+      - pct_of_peak_year: fantasy_points / max_fantasy_points_for_player
 
     Notes
     -----
@@ -344,6 +427,11 @@ def calculate_years_since_peak(
 
     out["years_before_peak"] = (peak_year - out[year_col]).clip(lower=0).astype(int)
     out["years_after_peak"] = (out[year_col] - peak_year).clip(lower=0).astype(int)
+
+    out["pct_of_peak_year"] = (
+        out["fantasy_points"]
+        / out.groupby(player_col)["fantasy_points"].transform("max")
+    ).astype(float)
 
     return out
 
@@ -388,7 +476,9 @@ def rolling_trend(feature, years, window=3):
 
 # Creating features for tracking core statistical career totals & year-over-year deltas
 # This also tracks total fantasy points scored in prior and following seasons
-def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
+def create_metrics(
+    df: pd.DataFrame, CORE_STATS: list, CAREER_STATS: list
+) -> pd.DataFrame:
     """
     Add per-player career cumulative totals, 3-year statistical averages, and year-over-year deltas for specified stats.
 
@@ -399,6 +489,8 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
         plus any stat columns listed in CORE_STATS.
     CORE_STATS : list
         List of stat column names to compute career sums and year-over-year deltas for.
+    CAREER_STATS : list
+        List of stat column names to compute career cumulative totals for.
 
     Returns
     -------
@@ -420,6 +512,13 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
         for c in CORE_STATS
         if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
     ]
+    # Repeat for career stats
+    career_stats = [
+        c
+        for c in CAREER_STATS
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c])
+    ]
+
     df["year"] = df["year"].astype(int)
 
     # Sort & group
@@ -446,7 +545,7 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
     )
 
     # Career cumulative totals (up to current row)
-    career = g[stats].cumsum().add_prefix("career_")
+    career = g[career_stats].cumsum().add_prefix("career_")
 
     # Tracking number of unique teams played for in career so far
     # treat '3tm' as 2 teams, otherwise count as 1 (3tm indicates that they played for 2 *new* teams that season)
@@ -475,21 +574,21 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
         .add_prefix("avg3yr_")
     )
 
-    # Player tiering: BPM-based role bucket (3yr avg)
-    def _bpm_tier(bpm: float) -> str:
-        if pd.isna(bpm):
+    # Player tiering: VORP-based role bucket (3yr avg)
+    def _vorp_tier(vorp: float) -> str:
+        if pd.isna(vorp):
             return "unknown"
-        if bpm >= 5.0:
+        if vorp >= 4.0:
             return "superstar"
-        if bpm >= 3.0:
+        if vorp >= 2.5:
             return "star"
-        if bpm >= 1.5:
-            return "starter_plus"
-        if bpm >= -0.5:
+        if vorp >= 1:
+            return "starter"
+        if vorp >= 0:
             return "rotation"
         return "bench"
 
-    bpm_tier = rolling_avgs["avg3yr_bpm"].apply(_bpm_tier)
+    bpm_tier = rolling_avgs["avg3yr_bpm"].apply(_vorp_tier)
     rolling_avgs["player_tier"] = bpm_tier.astype("category")
 
     # Calculating total minutes played and games played in the past 3 years
@@ -554,8 +653,8 @@ def create_metrics(df: pd.DataFrame, CORE_STATS: list) -> pd.DataFrame:
     )
     trends.index = trends.index.droplevel(0)  # Remove groupby level to match df index
 
-    # year-over-year deltas for all stats at once
-    deltas = g[stats].diff()
+    # year-over-year deltas select core stats
+    deltas = g[["min_pg", "bpm", "vorp", "usg_pct", "fantasy_points"]].diff()
     deltas.columns = [f"{c}_delta" for c in deltas.columns]
 
     # Capturing each player's fantasy points in the prior season
