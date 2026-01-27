@@ -2,6 +2,22 @@
 # Configuration file for NBA player performance prediction model
 ##################################################
 
+import warnings
+import numpy as np
+from hyperopt import hp
+
+# =============================================================================
+# Warning Suppression
+# =============================================================================
+# Suppress common warnings from dependencies (pandas, sklearn, xgboost, etc.)
+# This keeps notebook output clean while still allowing errors to surface.
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# =============================================================================
+# League Settings
+# =============================================================================
+
 # Setting roster size & league size parameters
 ROSTER_SIZE = 16
 LEAGUE_SIZE = 12
@@ -16,6 +32,26 @@ B_SPLIT = 0.2
 
 # Defining URL for pulling NBA projections
 FANTASYPROS_URL = "https://www.fantasypros.com/nba/stats/overall.php"
+
+# =============================================================================
+# Model Hyperparameter Space
+# =============================================================================
+# Define Hyperopt search space for final model tuning
+SPACE = {
+    "learning_rate": hp.loguniform("learning_rate", np.log(0.01), np.log(0.1)),
+    # leaf-based complexity control
+    "max_leaves": hp.quniform("max_leaves", 8, 48, 1),
+    "subsample": hp.uniform("subsample", 0.75, 0.95),
+    "colsample_bytree": hp.uniform("colsample_bytree", 0.65, 0.95),
+    "min_child_weight": hp.loguniform("min_child_weight", np.log(0.1), np.log(25.0)),
+    "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-3), np.log(5.0)),
+    "reg_alpha": hp.loguniform("reg_alpha", np.log(1e-3), np.log(5.0)),
+    "gamma": hp.loguniform("gamma", np.log(1e-3), np.log(2.0)),
+}
+
+# =============================================================================
+# Data Processing Settings
+# =============================================================================
 
 # Define set of NBA team abbreviations (current + recent expansion/contraction awareness)
 NBA_TEAMS = {

@@ -53,8 +53,8 @@ def split_data_nba(
     pred_year: int,
     target_col: str = "fantasy_points_future",
     drop_cols: List[str] = None,
-    test_size: float = 0.2,
-    val_size: float = 0.2,
+    test_size: float = 0.1,
+    val_size: float = 0.1,
     random_state: int = 62820,
 ):
     """
@@ -144,8 +144,10 @@ def scale_numeric_train_test(
 
 def create_baseline_nba(
     X_train: pd.DataFrame,
+    X_val: pd.DataFrame,
     X_test: pd.DataFrame,
     y_train: pd.Series,
+    y_val: pd.Series,
     y_test: pd.Series,
 ):
     """
@@ -155,10 +157,14 @@ def create_baseline_nba(
     ----------
     X_train : pd.DataFrame
         Training feature matrix (predictors).
+    X_val : pd.DataFrame
+        Validation feature matrix (predictors).
     X_test : pd.DataFrame
         Testing feature matrix (predictors).
     y_train : pd.Series
         Training target vector (future fantasy points).
+    y_val : pd.Series
+        Validation target vector (future fantasy points).
     y_test : pd.Series
         Testing target vector (future fantasy points).
 
@@ -171,10 +177,15 @@ def create_baseline_nba(
 
     Notes
     -----
+    - Combines train and validation sets for training (no early stopping for baseline).
     - Prints RMSE, MAE, and R^2 metrics for the test set.
     - Uses fixed hyperparameters for the baseline model.
-    - Assumes categorical features are handled appropriately in X_train/X_test.
+    - Assumes categorical features are handled appropriately in X_train/X_val/X_test.
     """
+    # Combine train and validation sets for baseline model
+    X_train_full = pd.concat([X_train, X_val], axis=0)
+    y_train_full = pd.concat([y_train, y_val], axis=0)
+
     model = XGBRegressor(
         n_estimators=100,
         learning_rate=0.1,
@@ -186,7 +197,7 @@ def create_baseline_nba(
         enable_categorical=True,
     )
 
-    model.fit(X_train, y_train)
+    model.fit(X_train_full, y_train_full)
 
     y_pred = model.predict(X_test)
 
@@ -261,14 +272,14 @@ def tune_xgb_nba(
     metric: str = "asymmetric",
     evals: int = 75,
     random_state: int = 62820,
-) -> dict:
+) -> Tuple[dict, int]:
     """
     Performs hyperparameter optimization for an XGBoost regressor using Hyperopt.
 
     This function tunes XGBoost model hyperparameters by minimizing a specified loss metric
     (RMSE, MAE, or an asymmetric loss) on the validation set. The search is performed using
     the Hyperopt library and the Tree of Parzen Estimators (TPE) algorithm. The function
-    returns the best set of hyperparameters found.
+    returns the best set of hyperparameters found and the best iteration count.
 
     Parameters
     ----------
@@ -284,8 +295,6 @@ def tune_xgb_nba(
         Hyperparameter search space for Hyperopt.
     metric : str, default "asymmetric"
         Metric to optimize ("rmse", "mae", or "asymmetric").
-    alpha : float, default 1.5
-        Penalty multiplier for under-predictions in the asymmetric loss.
     evals : int, default 75
         Number of Hyperopt evaluations.
     random_state : int, default 62820
@@ -295,6 +304,8 @@ def tune_xgb_nba(
     -------
     best_params : dict
         Dictionary of the best hyperparameters found.
+    best_iteration : int
+        Number of boosting rounds from the best trial (for use in final model).
     """
 
     def objective(params):
@@ -364,14 +375,16 @@ def tune_xgb_nba(
 
     # print the best trial's metrics
     best_trial = trials.best_trial["result"]
+    best_iteration = best_trial.get("best_iteration", 100)
     print("Best Parameters:", best_params)
     print(
         f"[Best trial @ val] optimized={metric} "
         f"| RMSE={best_trial.get('rmse', float('nan')):.3f} "
         f"| MAE={best_trial.get('mae', float('nan')):.3f} "
+        f"| best_iteration={best_iteration}"
     )
 
-    return best_params
+    return best_params, best_iteration
 
 
 # Function to create final model after tuning
@@ -383,10 +396,12 @@ def create_model_nba(
     y_val: pd.Series,
     y_test: pd.Series,
     final_params: dict,
+    n_estimators: int,
+    n_estimators_mult: float = 1.15,
     random_state: int = 62820,
 ):
     """
-    Fit a final XGBoost regression model using provided hyperparameters and early stopping on a validation set,
+    Fit a final XGBoost regression model using provided hyperparameters on combined train+val data,
     then evaluate performance on a held-out test set.
 
     Parameters
@@ -394,17 +409,21 @@ def create_model_nba(
     X_train : pd.DataFrame
         Training feature matrix.
     X_val : pd.DataFrame
-        Validation feature matrix (for early stopping).
+        Validation feature matrix (combined with train for final fit).
     X_test : pd.DataFrame
         Test feature matrix (for final evaluation).
     y_train : pd.Series
         Training target vector.
     y_val : pd.Series
-        Validation target vector.
+        Validation target vector (combined with train for final fit).
     y_test : pd.Series
         Test target vector.
     final_params : dict
         Dictionary of tuned XGBoost hyperparameters.
+    n_estimators : int
+        Best iteration count from tuning (used to set n_estimators for final model).
+    n_estimators_mult : float, default 1.15
+        Multiplier applied to n_estimators to account for larger training set.
     random_state : int, default 62820
         Random seed for reproducibility.
 
@@ -417,36 +436,29 @@ def create_model_nba(
 
     Notes
     -----
+    - Combines train and validation sets for final model fitting.
+    - Uses n_estimators * n_estimators_mult (default 1.15) to set boosting rounds.
     - Prints RMSE, MAE, and R^2 metrics for the test set.
-    - Uses early stopping on the validation set.
     - Assumes categorical features are handled appropriately in X_train/X_val/X_test.
-    - Prints the best iteration if available.
     """
+    # Combine train and validation sets for final model
+    X_train_full = pd.concat([X_train, X_val], axis=0)
+    y_train_full = pd.concat([y_train, y_val], axis=0)
+
+    # Calculate final n_estimators with multiplier
+    final_n_estimators = int(n_estimators * n_estimators_mult)
 
     model = XGBRegressor(
         objective="reg:squarederror",
         **final_params,
         enable_categorical=True,
-        n_estimators=5000,
+        n_estimators=final_n_estimators,
         random_state=random_state,
         n_jobs=-1,
         tree_method="hist",
-        eval_metric="rmse",
-        early_stopping_rounds=100,
     )
 
-    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
-
-    if hasattr(model, "best_iteration") and model.best_iteration is not None:
-        print(f"Best iteration: {model.best_iteration}")
-
-    # --- Validation metrics (optional but useful) ---
-    val_pred = model.predict(X_val)
-    val_rmse = np.sqrt(mean_squared_error(y_val, val_pred))
-    val_mae = mean_absolute_error(y_val, val_pred)
-    val_r2 = r2_score(y_val, val_pred)
-
-    print(f"[Val] RMSE: {val_rmse:.3f} | MAE: {val_mae:.3f} | R^2: {val_r2:.3f}")
+    model.fit(X_train_full, y_train_full)
 
     # --- Test metrics ---
     test_pred = model.predict(X_test)
