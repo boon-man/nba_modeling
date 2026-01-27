@@ -4,6 +4,77 @@ import unicodedata
 from config import NAME_OVERRIDES
 
 
+def merge_nba_dataframes(
+    api_df: pd.DataFrame,
+    bref_df: pd.DataFrame,
+    *,
+    join_keys: list[str] = None,
+    required_col: str = "team",
+    reorder_cols: list[str] = None,
+) -> pd.DataFrame:
+    """
+    Merge NBA API data with Basketball Reference data and clean the result.
+
+    Performs a left join on the specified keys, removes duplicate columns,
+    drops rows missing required data, and reorders key columns for readability.
+
+    Parameters
+    ----------
+    api_df : pd.DataFrame
+        Primary dataframe from NBA API containing player statistics.
+    bref_df : pd.DataFrame
+        Secondary dataframe from Basketball Reference with advanced metrics.
+    join_keys : list[str], optional
+        Columns to join on. Defaults to ["player_name_clean", "year"].
+    required_col : str, default "team"
+        Column that must be non-null; rows with missing values are dropped.
+    reorder_cols : list[str], optional
+        Columns to move immediately after "year" for readability.
+        Defaults to ["team", "ws"].
+
+    Returns
+    -------
+    pd.DataFrame
+        Merged and cleaned dataframe sorted by player name and year.
+
+    Notes
+    -----
+    - Columns from bref_df that duplicate api_df columns (excluding join keys)
+      receive a "_bref" suffix; only the first occurrence is kept.
+    - Rows where `required_col` is null indicate failed joins and are dropped.
+    """
+    if join_keys is None:
+        join_keys = ["player_name_clean", "year"]
+    if reorder_cols is None:
+        reorder_cols = ["team", "ws"]
+
+    # Merge dataframes
+    combined = pd.merge(
+        api_df,
+        bref_df,
+        on=join_keys,
+        how="left",
+        suffixes=("", "_bref"),
+    )
+
+    # Remove duplicate columns (keep first occurrence)
+    combined = combined.loc[:, ~combined.columns.duplicated()]
+
+    # Drop rows missing required column
+    combined = combined[combined[required_col].notna()]
+
+    # Sort by player and year
+    combined = combined.sort_values(by=join_keys).reset_index(drop=True)
+
+    # Reorder specified columns to appear after "year"
+    for i, col in enumerate(reorder_cols):
+        if col in combined.columns:
+            insert_pos = combined.columns.get_loc("year") + 1 + i
+            combined.insert(insert_pos, col, combined.pop(col))
+
+    return combined
+
+
 def clean_name(name: str) -> str:
     """
     Cleans and normalizes player names by removing punctuation,
