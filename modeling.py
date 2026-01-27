@@ -8,6 +8,46 @@ from xgboost import XGBRegressor
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 
 
+def sanitize_dtypes(X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sanitize pandas dtypes for packages (notably XGBoost) that choke on
+    pandas StringDtype-backed categoricals (e.g., categories dtype 'string[python]').
+
+    - Converts pandas StringDtype columns -> object
+    - Converts object columns to category (XGBoost enable_categorical support)
+    - Forces category columns to be object-backed categories
+    - Leaves numeric columns untouched
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Input dataframe to sanitize.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with sanitized dtypes ready for XGBoost.
+    """
+    out = X.copy()
+
+    # Convert pandas StringDtype columns to plain object
+    string_cols = out.select_dtypes(include=["string"]).columns
+    for c in string_cols:
+        out[c] = out[c].astype(object)
+
+    # Convert object columns to category (for XGBoost categorical support)
+    object_cols = out.select_dtypes(include=["object"]).columns
+    for c in object_cols:
+        out[c] = out[c].astype("category")
+
+    # Force categoricals to have object categories (avoid 'string[python]' categories)
+    cat_cols = out.select_dtypes(include=["category"]).columns
+    for c in cat_cols:
+        out[c] = out[c].astype(object).astype("category")
+
+    return out
+
+
 def split_data_nba(
     df: pd.DataFrame,
     pred_year: int,
@@ -53,6 +93,11 @@ def split_data_nba(
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_full, y_train_full, test_size=val_size, random_state=random_state
     )
+
+    # Sanitize dtypes for XGBoost compatibility
+    X_train = sanitize_dtypes(X_train)
+    X_val = sanitize_dtypes(X_val)
+    X_test = sanitize_dtypes(X_test)
 
     return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols
 
