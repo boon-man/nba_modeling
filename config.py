@@ -2,8 +2,56 @@
 # Configuration file for NBA player performance prediction model
 ##################################################
 
+import warnings
+import numpy as np
+from hyperopt import hp
+
+# =============================================================================
+# Warning Suppression
+# =============================================================================
+# Suppress common warnings from dependencies (pandas, sklearn, xgboost, etc.)
+# This keeps notebook output clean while still allowing errors to surface.
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# =============================================================================
+# League Settings
+# =============================================================================
+
+# Setting roster size & league size parameters
+ROSTER_SIZE = 16
+LEAGUE_SIZE = 12
+# Defining bonus player pool size for draft board
+BONUS_PLAYER_POOL_MULT = 1.15
+
+# Defining positional roster allocations
+G_SPLIT = 0.4
+W_SPLIT = 0.4
+B_SPLIT = 0.2
+
+
 # Defining URL for pulling NBA projections
 FANTASYPROS_URL = "https://www.fantasypros.com/nba/stats/overall.php"
+
+# =============================================================================
+# Model Hyperparameter Space
+# =============================================================================
+# Define Hyperopt search space for final model tuning
+SPACE = {
+    "learning_rate": hp.loguniform("learning_rate", np.log(0.01), np.log(0.1)),
+    # leaf-based complexity control
+    "max_leaves": hp.quniform("max_leaves", 8, 48, 1),
+    "subsample": hp.uniform("subsample", 0.75, 0.95),
+    "colsample_bytree": hp.uniform("colsample_bytree", 0.65, 0.95),
+    "min_child_weight": hp.loguniform("min_child_weight", np.log(0.1), np.log(25.0)),
+    "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-3), np.log(5.0)),
+    "reg_alpha": hp.loguniform("reg_alpha", np.log(1e-3), np.log(5.0)),
+    "gamma": hp.loguniform("gamma", np.log(1e-3), np.log(2.0)),
+}
+
+# =============================================================================
+# Data Processing Settings
+# =============================================================================
 
 # Define set of NBA team abbreviations (current + recent expansion/contraction awareness)
 NBA_TEAMS = {
@@ -59,7 +107,6 @@ SELECTED_COLUMNS = [
     "fg3m",
     "fg3a",
     "fg3_pct",
-    "ftm",
     "fta",
     "ft_pct",
     "oreb",
@@ -70,7 +117,6 @@ SELECTED_COLUMNS = [
     "stl",
     "blk",
     "blka",
-    "pf",
     "pfd",
     "plus_minus",
     "dd2",
@@ -80,15 +126,12 @@ SELECTED_COLUMNS = [
     "fg_pct_rank",
     "fg3a_rank",
     "fg3_pct_rank",
-    "ftm_rank",
     "fta_rank",
     "oreb_rank",
     "reb_rank",
     "ast_rank",
-    "tov_rank",
     "stl_rank",
     "blk_rank",
-    "pf_rank",
     "pfd_rank",
     "off_rating",
     "def_rating",
@@ -105,35 +148,18 @@ SELECTED_COLUMNS = [
     "pie",
     "fgm_pg",
     "fga_pg",
-    "playoff_age",
-    "playoff_gp",
-    "playoff_w_pct",
     "playoff_min",
     "playoff_pts",
-    "playoff_usg_pct",
     "playoff_fga",
     "playoff_fta",
-    "playoff_ft_pct",
-    "playoff_reb",
-    "playoff_ast",
-    "playoff_stl",
-    "playoff_blk",
     "playoff_nba_fantasy_pts",
     "playoff_plus_minus",
     "playoff_efg_pct",
-    "playoff_off_rating",
-    "playoff_net_rating",
-    "playoff_ast_to",
-    "playoff_efg_pct",
-    "playoff_pie",
-    "playoff_fgm_pg",
-    "playoff_fga_pg",
 ]
 
 BREF_COLS = [
     "player_name_clean",
     "year",
-    "age",
     "team",
     "pos",
     "mp",
@@ -144,22 +170,15 @@ BREF_COLS = [
     "blk_pg",
     "tov_pg",
     "pts_pg",
-    "ortg",
-    "drtg",
     "3par",
     "ftr",
     "orbpct",
-    "drbpct",
     "astpct",
     "stlpct",
     "blkpct",
     "tovpct",
-    "ows",
-    "dws",
     "ws",
     "ws/48",
-    "obpm",
-    "dbpm",
     "bpm",
     "vorp",
     "awards",
@@ -192,12 +211,26 @@ CORE_STATS = [
     "playoff_pts",
     "usg_pct",
     "ws",
-    "obpm",
-    "dbpm",
     "bpm",
     "vorp",
     "all_star",
     "all_nba_points",
+    "fantasy_points",
+]
+
+# Stats to track for career totals
+CAREER_STATS = [
+    "eligible_games_played",
+    "gp",
+    "mp",
+    "pts",
+    "ast",
+    "reb",
+    "fg3m",
+    "playoff_pts",
+    "ws",
+    "bpm",
+    "vorp",
     "fantasy_points",
 ]
 

@@ -2,7 +2,7 @@ pandas==2.2.2
 numpy==1.26.4
 unicodedata2==15.1.0
 nba_api==1.4.1
-scikit-learn==1.5.0
+scikit-learn>=1.5.0
 xgboost==2.0.3
 hyperopt==0.2.7
 plotnine==0.13.6
