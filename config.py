@@ -38,15 +38,15 @@ FANTASYPROS_URL = "https://www.fantasypros.com/nba/stats/overall.php"
 # =============================================================================
 # Define Hyperopt search space for final model tuning
 SPACE = {
-    "learning_rate": hp.loguniform("learning_rate", np.log(0.01), np.log(0.1)),
+    "learning_rate": hp.loguniform("learning_rate", np.log(0.01), np.log(0.08)),
     # leaf-based complexity control
     "max_leaves": hp.quniform("max_leaves", 8, 48, 1),
-    "subsample": hp.uniform("subsample", 0.75, 0.95),
+    "subsample": hp.uniform("subsample", 0.7, 0.95),
     "colsample_bytree": hp.uniform("colsample_bytree", 0.65, 0.95),
-    "min_child_weight": hp.loguniform("min_child_weight", np.log(0.1), np.log(25.0)),
+    "min_child_weight": hp.loguniform("min_child_weight", np.log(0.1), np.log(20.0)),
     "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-3), np.log(5.0)),
     "reg_alpha": hp.loguniform("reg_alpha", np.log(1e-3), np.log(5.0)),
-    "gamma": hp.loguniform("gamma", np.log(1e-3), np.log(2.0)),
+    "gamma": hp.loguniform("gamma", np.log(1e-4), np.log(2.0)),
 }
 
 # =============================================================================

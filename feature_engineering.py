@@ -794,6 +794,7 @@ def add_age_features(
     - age_x_bpm: age × BPM interaction
     - age_x_min_pg: age × minutes per game interaction
     - min_pg_headroom: upside proxy (36 - min_pg)
+    - age_x_min_pg_headroom: age × headroom interaction (captures young player upside)
     - incomplete_career_history: flag for players missing full career data
     - pk_adj: draft pick adjusted for career length (decays after 4 years)
 
@@ -833,6 +834,9 @@ def add_age_features(
 
     # Minutes headroom (upside proxy for young players)
     out["min_pg_headroom"] = 36 - out["min_pg"]
+
+    # Age × headroom interaction (young players with room to grow)
+    out["age_x_min_pg_headroom"] = (40 - out["age"]) * out["min_pg_headroom"]
 
     # Incomplete career history flag
     out["incomplete_career_history"] = (
@@ -970,6 +974,7 @@ def add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
 
     Features created:
     - fpts_std_3yr: 3-year rolling standard deviation of fantasy points
+    - fpts_cv_3yr: 3-year coefficient of variation (std / mean)
     - fpts_yoy_pct_change: year-over-year percentage change
     - has_playoff_exp: flag for career playoff experience
 
@@ -994,6 +999,11 @@ def add_trend_features(df: pd.DataFrame) -> pd.DataFrame:
     # Volatility (3-year rolling std)
     out["fpts_std_3yr"] = out.groupby("player_name_clean")["fantasy_points"].transform(
         lambda x: x.rolling(3, min_periods=2).std()
+    )
+
+    # Coefficient of variation (normalized volatility)
+    out["fpts_cv_3yr"] = out["fpts_std_3yr"] / out["avg3yr_fantasy_points"].replace(
+        0, np.nan
     )
 
     # Year-over-year momentum

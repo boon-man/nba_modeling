@@ -6,6 +6,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from xgboost import XGBRegressor
 from hyperopt import fmin, tpe, Trials, STATUS_OK
+from tqdm import tqdm
 
 
 def sanitize_dtypes(X: pd.DataFrame) -> pd.DataFrame:
@@ -338,6 +339,7 @@ def tune_xgb_nba(
         # --- compute all metrics for visibility ---
         rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
         mae = float(mean_absolute_error(y_val, y_pred))
+        r2 = float(r2_score(y_val, y_pred))
 
         # --- choose the one to optimize ---
         if metric == "rmse":
@@ -353,6 +355,7 @@ def tune_xgb_nba(
             "status": STATUS_OK,
             "rmse": rmse,
             "mae": mae,
+            "r2": r2,
             "best_iteration": getattr(model, "best_iteration", None),
         }
 
@@ -381,6 +384,7 @@ def tune_xgb_nba(
         f"[Best trial @ val] optimized={metric} "
         f"| RMSE={best_trial.get('rmse', float('nan')):.3f} "
         f"| MAE={best_trial.get('mae', float('nan')):.3f} "
+        f"| R^2={best_trial.get('r2', float('nan')):.3f} "
         f"| best_iteration={best_iteration}"
     )
 
@@ -523,3 +527,205 @@ def build_prediction_frame(
     X_pred = df_pred[feature_cols]
 
     return df_pred, X_pred
+
+
+def generate_prediction_intervals(
+    X_train: pd.DataFrame,
+    X_val: pd.DataFrame,
+    y_train: pd.Series,
+    y_val: pd.Series,
+    X_pred: pd.DataFrame,
+    source_df: pd.DataFrame,
+    *,
+    base_params: dict,
+    model_objective: str = "reg:squarederror",
+    metric: str = "rmse",
+    n_bootstrap: int = 30,
+    random_state: int = 62820,
+    group_col: str = "player_id",
+    id_cols: List[str] = None,
+    n_estimators: int = 5000,
+    early_stopping_rounds: int = 50,
+) -> pd.DataFrame:
+    """
+    Estimate prediction intervals via bootstrap-resampled XGBoost models.
+
+    Default strategy:
+      - Combines train and validation sets internally.
+      - Bootstrap sample at the *player* level (group_col).
+      - Use out-of-bag (OOB) *players* each iteration for early stopping.
+      - Aggregate predictions across bootstraps to produce percentile intervals.
+
+    Parameters
+    ----------
+    X_train : pd.DataFrame
+        Training feature matrix (from split_data_nba).
+    X_val : pd.DataFrame
+        Validation feature matrix (from split_data_nba).
+    y_train : pd.Series
+        Training target vector.
+    y_val : pd.Series
+        Validation target vector.
+    X_pred : pd.DataFrame
+        Prediction feature matrix (from build_prediction_frame).
+    source_df : pd.DataFrame
+        Original combined DataFrame containing player ID columns for grouping.
+    base_params : dict
+        Tuned XGBoost hyperparameters (from tune_xgb_nba).
+    model_objective : str, default "reg:squarederror"
+        XGBoost objective function.
+    metric : str, default "rmse"
+        Evaluation metric for early stopping.
+    n_bootstrap : int, default 30
+        Number of bootstrap iterations.
+    random_state : int, default 62820
+        Random seed for reproducibility.
+    group_col : str, default "player_id"
+        Column to use for player-level grouping in bootstrap resampling.
+    id_cols : List[str], optional
+        ID columns to include in output. Default: ["player_id", "player_name_clean"]
+    n_estimators : int, default 5000
+        Maximum number of boosting rounds per bootstrap model.
+    early_stopping_rounds : int, default 50
+        Early stopping patience for OOB evaluation.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with prediction intervals and upside/downside metrics:
+        - pred_mean: Mean prediction across bootstraps
+        - pred_p10: 10th percentile prediction
+        - pred_p50: Median prediction
+        - pred_p90: 90th percentile prediction
+        - pred_width_80: Width of 80% prediction interval (p90 - p10)
+        - pred_upside: Upside potential (p90 - mean)
+        - pred_downside: Downside risk (mean - p10)
+        - implied_upside: Ratio of upside to downside
+
+    Notes
+    -----
+    - Combines train and validation sets internally for bootstrap resampling.
+    - Recovers player ID columns from source_df using index alignment.
+    - If OOB set is too small in an iteration, falls back to training without early stopping.
+    - Assumes X_train, X_val, and X_pred have been sanitized for XGBoost compatibility.
+    """
+    if id_cols is None:
+        id_cols = ["player_id", "player_name_clean"]
+
+    # --- Combine train and validation sets ---
+    X_combined = pd.concat([X_train, X_val], axis=0)
+    y_combined = pd.concat([y_train, y_val], axis=0)
+
+    # --- Recover ID columns from source_df using index alignment ---
+    for col in id_cols:
+        if col in source_df.columns:
+            X_combined[col] = source_df.loc[X_combined.index, col].values
+
+    # --- Validate group_col is present ---
+    if group_col not in X_combined.columns:
+        raise ValueError(
+            f"OOB-by-player requires '{group_col}' to be present in source_df. "
+            f"Ensure source_df contains the column '{group_col}'."
+        )
+
+    def _drop_ids(df: pd.DataFrame) -> pd.DataFrame:
+        return df.drop(columns=[c for c in id_cols if c in df.columns], errors="ignore")
+
+    # --- Prepare matrices ---
+    X_tr = _drop_ids(X_combined).reset_index(drop=True)
+    X_p = _drop_ids(X_pred).reset_index(drop=True)
+    y_tr_full = y_combined.reset_index(drop=True)
+
+    # --- Params ---
+    params = {
+        "objective": model_objective,
+        "eval_metric": metric,
+        "tree_method": "hist",
+        "enable_categorical": True,
+    }
+    params.update(base_params or {})
+
+    # --- Out of Bag (OOB) grouping (player-level) ---
+    group_ids = X_combined[group_col].reset_index(drop=True).values
+    unique_players = pd.unique(group_ids)
+
+    # Guardrails
+    min_oob_rows = 200  # keep early stopping stable
+
+    preds_list: List[np.ndarray] = []
+
+    for b in tqdm(range(n_bootstrap), desc="Bootstrapping prediction intervals"):
+        rng_b = np.random.default_rng(random_state + b)
+
+        # Sample players with replacement, then include all rows for sampled players
+        boot_players = rng_b.choice(
+            unique_players, size=len(unique_players), replace=True
+        )
+        boot_set = set(boot_players)
+
+        in_bag_mask = np.isin(group_ids, list(boot_set))
+        idx_boot = np.where(in_bag_mask)[0]
+        idx_oob = np.where(~in_bag_mask)[0]
+
+        X_fit = X_tr.iloc[idx_boot]
+        y_fit = y_tr_full.iloc[idx_boot]
+
+        model = XGBRegressor(
+            n_estimators=n_estimators,
+            random_state=random_state + b,
+            early_stopping_rounds=early_stopping_rounds,
+            n_jobs=-1,
+            **params,
+        )
+
+        # Use OOB players for early stopping when we have enough rows
+        use_oob = idx_oob.size >= min_oob_rows
+        if use_oob:
+            X_oob = X_tr.iloc[idx_oob]
+            y_oob = y_tr_full.iloc[idx_oob]
+            model.fit(X_fit, y_fit, eval_set=[(X_oob, y_oob)], verbose=False)
+        else:
+            # Fallback: fit without eval_set (early stopping won't activate)
+            model.fit(X_fit, y_fit, verbose=False)
+
+        base_preds = model.predict(X_p)
+
+        # --- Add residual noise from OOB predictions to generate player prediction intervals ---
+        if use_oob:
+            oob_preds = model.predict(X_oob)
+            residuals = y_oob.values - oob_preds
+            residuals = residuals - residuals.mean()  # de-bias
+            noise = rng_b.choice(residuals, size=len(base_preds), replace=True)
+            preds = base_preds + noise
+        else:
+            preds = base_preds
+
+        preds_list.append(preds)
+
+    pred_mat = np.vstack(preds_list)  # (n_bootstrap, n_rows_pred)
+
+    out = pd.DataFrame(
+        {
+            "pred_mean": pred_mat.mean(axis=0),
+            "pred_p10": np.percentile(pred_mat, 10, axis=0),
+            "pred_p50": np.percentile(pred_mat, 50, axis=0),
+            "pred_p90": np.percentile(pred_mat, 90, axis=0),
+        },
+        index=X_pred.index,
+    )
+
+    downside_floor = 0.02 * out["pred_mean"].abs().clip(lower=1.0)  # 2% of mean
+
+    out["pred_width_80"] = out["pred_p90"] - out["pred_p10"]
+    out["pred_upside"] = out["pred_p90"] - out["pred_mean"]
+    out["pred_downside"] = out["pred_mean"] - out["pred_p10"]
+    out["implied_upside"] = out["pred_upside"] / (out["pred_downside"] + downside_floor)
+
+    # Prepend id columns from source_df for prediction rows
+    id_present = [c for c in id_cols if c in source_df.columns]
+    if id_present:
+        ids = source_df.loc[X_pred.index, id_present].reset_index(drop=True)
+        out = pd.concat([ids, out.reset_index(drop=True)], axis=1)
+        out.index = X_pred.index
+
+    return out
