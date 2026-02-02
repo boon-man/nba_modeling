@@ -4,6 +4,7 @@ from typing import List, Tuple
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from scipy.stats import spearmanr
 from xgboost import XGBRegressor
 from hyperopt import fmin, tpe, Trials, STATUS_OK
 from tqdm import tqdm
@@ -150,7 +151,7 @@ def create_baseline_nba(
     y_train: pd.Series,
     y_val: pd.Series,
     y_test: pd.Series,
-):
+) -> Tuple[XGBRegressor, np.ndarray]:
     """
     Train a baseline XGBoost regression model to predict future fantasy points and evaluate its performance.
 
@@ -205,10 +206,12 @@ def create_baseline_nba(
     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
     mae = mean_absolute_error(y_test, y_pred)
     r2 = r2_score(y_test, y_pred)
+    spearman_corr, _ = spearmanr(y_test, y_pred)
 
     print(f"[Baseline] RMSE: {rmse:.3f}")
     print(f"[Baseline] MAE:  {mae:.3f}")
     print(f"[Baseline] R^2:  {r2:.3f}")
+    print(f"[Baseline] Spearman: {spearman_corr:.3f}")
 
     return model, y_pred
 
@@ -340,6 +343,7 @@ def tune_xgb_nba(
         rmse = float(np.sqrt(mean_squared_error(y_val, y_pred)))
         mae = float(mean_absolute_error(y_val, y_pred))
         r2 = float(r2_score(y_val, y_pred))
+        spearman_corr, _ = spearmanr(y_val, y_pred)
 
         # --- choose the one to optimize ---
         if metric == "rmse":
@@ -356,6 +360,7 @@ def tune_xgb_nba(
             "rmse": rmse,
             "mae": mae,
             "r2": r2,
+            "spearman": float(spearman_corr),
             "best_iteration": getattr(model, "best_iteration", None),
         }
 
@@ -385,6 +390,7 @@ def tune_xgb_nba(
         f"| RMSE={best_trial.get('rmse', float('nan')):.3f} "
         f"| MAE={best_trial.get('mae', float('nan')):.3f} "
         f"| R^2={best_trial.get('r2', float('nan')):.3f} "
+        f"| Spearman={best_trial.get('spearman', float('nan')):.3f} "
         f"| best_iteration={best_iteration}"
     )
 
@@ -403,7 +409,7 @@ def create_model_nba(
     n_estimators: int,
     n_estimators_mult: float = 1.15,
     random_state: int = 62820,
-):
+) -> Tuple[XGBRegressor, np.ndarray]:
     """
     Fit a final XGBoost regression model using provided hyperparameters on combined train+val data,
     then evaluate performance on a held-out test set.
@@ -469,8 +475,11 @@ def create_model_nba(
     test_rmse = np.sqrt(mean_squared_error(y_test, test_pred))
     test_mae = mean_absolute_error(y_test, test_pred)
     test_r2 = r2_score(y_test, test_pred)
+    test_spearman, _ = spearmanr(y_test, test_pred)
 
-    print(f"[Test] RMSE: {test_rmse:.3f} | MAE: {test_mae:.3f} | R^2: {test_r2:.3f}")
+    print(
+        f"[Test] RMSE: {test_rmse:.3f} | MAE: {test_mae:.3f} | R^2: {test_r2:.3f} | Spearman: {test_spearman:.3f}"
+    )
 
     return model, test_pred
 
