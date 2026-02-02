@@ -714,7 +714,7 @@ def generate_prediction_intervals(
         index=X_pred.index,
     )
 
-    downside_floor = 0.02 * out["pred_mean"].abs().clip(lower=1.0)  # 2% of mean
+    downside_floor = 0.01 * out["pred_mean"].abs().clip(lower=1.0)  # 1% of mean
 
     out["pred_width_80"] = out["pred_p90"] - out["pred_p10"]
     out["pred_upside"] = out["pred_p90"] - out["pred_mean"]

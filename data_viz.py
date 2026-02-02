@@ -14,6 +14,7 @@ from plotnine import (
     geom_line,
     geom_point,
     geom_col,
+    geom_smooth,
     coord_flip,
     geom_abline,
     geom_segment,
@@ -190,6 +191,15 @@ def plot_actual_vs_pred(results, color_palette, top_n=15, x_offset=10, y_offset=
             alpha=0.7,
             size=1.5,
             color=color_palette[0],
+        )
+        + geom_smooth(
+            method="lm",
+            se=True,
+            level=0.99,
+            color="#9ecae1",
+            fill="#c6dbef",
+            alpha=0.2,
+            size=0.5,
         )
         + geom_abline(slope=1, intercept=0, linetype="dashed", color="grey", alpha=0.4)
         + labs(
