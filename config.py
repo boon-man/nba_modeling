@@ -38,13 +38,13 @@ FANTASYPROS_URL = "https://www.fantasypros.com/nba/stats/overall.php"
 # =============================================================================
 # Define Hyperopt search space for final model tuning
 SPACE = {
-    "learning_rate": hp.loguniform("learning_rate", np.log(0.01), np.log(0.08)),
+    "learning_rate": hp.loguniform("learning_rate", np.log(0.01), np.log(0.1)),
     # leaf-based complexity control
-    "max_leaves": hp.quniform("max_leaves", 8, 56, 1),
+    "max_leaves": hp.quniform("max_leaves", 8, 64, 1),
     "subsample": hp.uniform("subsample", 0.7, 0.95),
     "colsample_bytree": hp.uniform("colsample_bytree", 0.6, 0.95),
     "min_child_weight": hp.loguniform("min_child_weight", np.log(0.1), np.log(25.0)),
-    "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-3), np.log(5.0)),
+    "reg_lambda": hp.loguniform("reg_lambda", np.log(1e-3), np.log(10.0)),
     "reg_alpha": hp.loguniform("reg_alpha", np.log(1e-3), np.log(10.0)),
     "gamma": hp.loguniform("gamma", np.log(1e-5), np.log(2.0)),
 }
@@ -152,6 +152,7 @@ SELECTED_COLUMNS = [
     "playoff_pts",
     "playoff_fga",
     "playoff_fta",
+    "playoff_usg_pct",
     "playoff_nba_fantasy_pts",
     "playoff_plus_minus",
     "playoff_efg_pct",
