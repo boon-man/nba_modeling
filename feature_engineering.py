@@ -497,7 +497,6 @@ def calculate_years_since_peak(
     Add peak-timing features based on each player's peak fantasy points season.
 
     Adds:
-      - years_before_peak: max(peak_year - year, 0)
       - years_after_peak:  max(year - peak_year, 0)
       - pct_of_peak_year: fantasy_points / max_fantasy_points_for_player
 
@@ -522,7 +521,6 @@ def calculate_years_since_peak(
 
     peak_year = out[player_col].map(peak_year_by_player).astype("Int64")
 
-    out["years_before_peak"] = (peak_year - out[year_col]).clip(lower=0).astype(int)
     out["years_after_peak"] = (out[year_col] - peak_year).clip(lower=0).astype(int)
 
     out["pct_of_peak_year"] = (
