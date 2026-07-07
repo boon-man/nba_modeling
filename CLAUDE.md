@@ -103,9 +103,23 @@ row; `data_cleaning.keep_tot_or_first` collapses these to one row per player-sea
 - **Hyperparameters**: search space is `config.SPACE` (leaf-based / `lossguide` growth);
   tuning uses Hyperopt TPE. Random seeds are passed explicitly everywhere for
   reproducibility — keep them.
-- **Prediction intervals**: `generate_prediction_intervals` bootstraps at the *player*
-  level (`group_col="player_id"`) and uses out-of-bag players for early stopping and
-  residual sampling. Note the TODO flagging the current resampling methodology.
+- **Prediction intervals**: `generate_prediction_intervals` takes the already-fit final
+  `model` (call it *after* `create_model_nba`, not before) and runs a player-level cluster
+  bootstrap — players sampled with replacement, each drawn player's rows replicated by its
+  draw count, refit at the model's fixed tree count with no early stopping. Bands center on
+  the final-model prediction (the draft-sheet number); width combines refit spread
+  (epistemic) with a global out-of-bag residual pool binned by fitted value (heteroscedastic
+  aleatoric noise). Outputs `pred_p05..p95` plus `ceiling_index`/`floor_index`/`upside_index`
+  (standardized league-wide across all predicted players, mean 100/sd 15; `upside_index` is
+  an OR-score that leans ceiling by design).
+- **`n_bootstrap=30` is the confirmed default** — do not lower it casually. It is a
+  deliberate reliability/variance tradeoff: the low count keeps run-to-run churn (a fresh
+  `random_state` gives a genuinely fresh simulation, so you don't over-index on the same
+  flagged players). Empirically (6-seed sweeps, model held fixed): cross-seed rank
+  correlation ≈ 0.62 (nb=12) → 0.73 (nb=20) → 0.77 (nb=30) for `ceiling_index`; the 20→30
+  gain is small (diminishing returns) and the highlighted top-30 rank churn is unchanged,
+  while 30 gives a steadier mid-board. Below ~20 the estimate gets noisy (`upside_index`
+  ρ≈0.51 at nb=12). 30 sits at the reliability/variance knee.
 
 ## Config
 
@@ -127,5 +141,3 @@ style when adding plots.
   league-configurable.
 - FantasyPros scraping and position-blending functions still live inline in the notebook
   and should be moved into `.py` modules.
-- Bootstrap resampling methodology needs revision (flagged inline in
-  `generate_prediction_intervals`).
