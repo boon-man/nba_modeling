@@ -7,6 +7,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import spearmanr
 from xgboost import XGBRegressor
 from hyperopt import fmin, tpe, Trials, STATUS_OK
+from statsmodels.nonparametric.smoothers_lowess import lowess
 from tqdm import tqdm
 
 
@@ -590,7 +591,76 @@ def build_prediction_frame(
     return df_pred, X_pred
 
 
+def index_100(x: np.ndarray) -> np.ndarray:
+    """
+    Standardize a vector to mean 100 / sd 15 (IQ / wRC+-style). Returns a flat 100 if the
+    input has no spread. Uses sample sd (ddof=1) to match R's sd().
+    """
+    x = np.asarray(x, dtype=float)
+    s = np.nanstd(x, ddof=1)
+    if not np.isfinite(s) or s == 0:
+        return np.full(x.shape, 100.0)
+    return 100.0 + 15.0 * (x - np.nanmean(x)) / s
+
+
+def _lowess_predict(y: np.ndarray, level: np.ndarray, frac: float = 0.75) -> np.ndarray:
+    """
+    Smooth ``y`` against ``level`` and return the fitted value at every ``level`` (the
+    Python analog of R's ``predict(loess(y ~ level), newdata=...)``).
+
+    Fits LOWESS on the finite (y, level) pairs, then interpolates the smoothed curve onto
+    all levels (values outside the fitted range are clamped to the nearest endpoint). Falls
+    back to a linear fit for tiny pools (<10 usable points), matching the R ``lm`` fallback.
+    """
+    y = np.asarray(y, dtype=float)
+    level = np.asarray(level, dtype=float)
+    mask = np.isfinite(y) & np.isfinite(level)
+
+    if mask.sum() >= 10:
+        smoothed = lowess(y[mask], level[mask], frac=frac, return_sorted=True)
+        xs, ys = smoothed[:, 0], smoothed[:, 1]
+        # np.interp needs strictly increasing x; average any tied LOWESS x-values
+        uniq_x, inverse = np.unique(xs, return_inverse=True)
+        if uniq_x.size != xs.size:
+            ys = np.array([ys[inverse == i].mean() for i in range(uniq_x.size)])
+            xs = uniq_x
+        return np.interp(level, xs, ys)
+
+    # Linear fallback for thin pools
+    if mask.sum() >= 2:
+        coef = np.polyfit(level[mask], y[mask], 1)
+        return np.polyval(coef, level)
+
+    return np.full(level.shape, np.nanmean(y[mask]) if mask.any() else 0.0)
+
+
+def level_adjust(x: np.ndarray, level: np.ndarray) -> np.ndarray:
+    """
+    Level-adjust a signal into a studentized residual against the projection level, so that
+    BOTH its average AND its spread are equalized across levels. A mean-only detrend flattens
+    the average but a higher-variance level still over-populates the tail; dividing by the
+    local spread fixes that, giving every projection level an equal shot at scoring high.
+
+    center = residual vs a smooth of value-vs-level; scale = smooth of |residual|-vs-level
+    (~ the conditional sd), floored to avoid blow-ups on thin/flat regions.
+    """
+    x = np.asarray(x, dtype=float)
+    level = np.asarray(level, dtype=float)
+
+    resid = x - _lowess_predict(x, level)  # center: above/below typical for the level
+    local_scale = _lowess_predict(np.abs(resid), level)  # scale: conditional |residual|
+
+    floor_scale = 0.05 * np.nanmedian(np.abs(resid))
+    if not np.isfinite(floor_scale) or floor_scale <= 0:
+        floor_scale = 1.0
+    local_scale = np.where(
+        np.isfinite(local_scale) & (local_scale > floor_scale), local_scale, floor_scale
+    )
+    return resid / local_scale
+
+
 def generate_prediction_intervals(
+    model: XGBRegressor,
     X_train: pd.DataFrame,
     X_val: pd.DataFrame,
     y_train: pd.Series,
@@ -602,102 +672,106 @@ def generate_prediction_intervals(
     model_objective: str = "reg:squarederror",
     metric: str = "rmse",
     n_bootstrap: int = 30,
+    n_noise_draws: int = 50,
+    n_resid_bins: int = 10,
+    min_bin: int = 30,
     random_state: int = 62820,
     group_col: str = "player_id",
     id_cols: List[str] = None,
-    n_estimators: int = 5000,
-    early_stopping_rounds: int = 50,
 ) -> pd.DataFrame:
     """
-    Estimate prediction intervals via bootstrap-resampled XGBoost models.
+    Simulate floor/ceiling prediction intervals via a player-level cluster bootstrap.
 
-    Default strategy:
-      - Combines train and validation sets internally.
-      - Bootstrap sample at the *player* level (group_col).
-      - Use out-of-bag (OOB) *players* each iteration for early stopping.
-      - Aggregate predictions across bootstraps to produce percentile intervals.
+    Reuses the already-fit full-data ``model`` (its tuned hyperparameters via ``base_params``
+    and its tree count), so no re-tuning happens. Each of ``n_bootstrap`` iterations draws
+    players WITH replacement and replicates every drawn player's rows by its draw count (a
+    true cluster bootstrap), fits at the model's FIXED tree count (no early stopping), and
+    predicts on the prediction players — the spread of these refit predictions is the
+    epistemic (model) uncertainty. Out-of-bag (fitted, residual) pairs from every iteration
+    accumulate into ONE global pool, binned by fitted value so the aleatoric noise a player
+    receives is sized to his own projection level (heteroscedastic). The predictive sample
+    per player is::
+
+        point_pred + epistemic deviation (refit spread, re-centered on point_pred) + binned OOB noise
+
+    giving ``n_bootstrap * n_noise_draws`` Monte Carlo draws each. Bands are centered on the
+    SAME full-data ``model`` prediction carried onto the draft sheet, not the bootstrap mean.
 
     Parameters
     ----------
-    X_train : pd.DataFrame
-        Training feature matrix (from split_data_nba).
-    X_val : pd.DataFrame
-        Validation feature matrix (from split_data_nba).
-    y_train : pd.Series
-        Training target vector.
-    y_val : pd.Series
-        Validation target vector.
+    model : XGBRegressor
+        The fitted full-data model (from create_model_nba). Supplies the band center
+        (model.predict(X_pred)) and the fixed tree count for the bootstrap refits.
+    X_train, X_val : pd.DataFrame
+        Training / validation feature matrices (from split_data_nba).
+    y_train, y_val : pd.Series
+        Training / validation targets.
     X_pred : pd.DataFrame
         Prediction feature matrix (from build_prediction_frame).
     source_df : pd.DataFrame
-        Original combined DataFrame containing player ID columns for grouping.
+        Combined DataFrame supplying the player ID columns for grouping / output.
     base_params : dict
-        Tuned XGBoost hyperparameters (from tune_xgb_nba).
+        Tuned XGBoost hyperparameters (from tune_xgb_nba) used for the refits.
     model_objective : str, default "reg:squarederror"
-        XGBoost objective function.
+        XGBoost objective for the refits.
     metric : str, default "rmse"
-        Evaluation metric for early stopping.
+        XGBoost eval_metric for the refits (no early stopping is used).
     n_bootstrap : int, default 30
-        Number of bootstrap iterations.
+        Number of cluster-bootstrap refits (epistemic spread). Kept modest so the tails
+        retain a little run-to-run variety.
+    n_noise_draws : int, default 50
+        Aleatoric noise draws layered on each refit -> n_bootstrap * n_noise_draws samples.
+    n_resid_bins : int, default 10
+        Number of fitted-value quantile bins for the heteroscedastic residual pool.
+    min_bin : int, default 30
+        If a fitted-value bin holds fewer residuals than this, fall back to the global pool.
     random_state : int, default 62820
-        Random seed for reproducibility.
+        Seed; a fresh value yields a genuinely fresh simulation.
     group_col : str, default "player_id"
-        Column to use for player-level grouping in bootstrap resampling.
+        Player-level grouping column recovered from source_df.
     id_cols : List[str], optional
-        ID columns to include in output. Default: ["player_id", "player_name_clean"]
-    n_estimators : int, default 5000
-        Maximum number of boosting rounds per bootstrap model.
-    early_stopping_rounds : int, default 50
-        Early stopping patience for OOB evaluation.
+        ID columns to prepend to the output. Default: ["player_id", "player_name_clean"].
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with prediction intervals and upside/downside metrics:
-        - pred_mean: Mean prediction across bootstraps
-        - pred_p10: 10th percentile prediction
-        - pred_p50: Median prediction
-        - pred_p90: 90th percentile prediction
-        - pred_width_80: Width of 80% prediction interval (p90 - p10)
-        - pred_upside: Upside potential (p90 - mean)
-        - pred_downside: Downside risk (mean - p10)
-        - implied_upside: Ratio of upside to downside
+        One row per prediction player with:
+        - pred_mean, pred_p05, pred_p10, pred_p50, pred_p90, pred_p95
+        - pred_width   : pred_p95 - pred_p05
+        - pred_upside  : pred_p95 - pred_mean (ceiling distance above the mean)
+        - pred_downside: pred_mean - pred_p05 (floor distance below the mean)
+        - ceiling_index: level-neutral, high = unusually high CEILING for the projection level
+        - floor_index  : level-neutral, high = unusually high / safe FLOOR for the level
+        - upside_index : single sortable OR-score; high = a strong ceiling-or-floor outlier
 
     Notes
     -----
-    - Combines train and validation sets internally for bootstrap resampling.
-    - Recovers player ID columns from source_df using index alignment.
-    - If OOB set is too small in an iteration, falls back to training without early stopping.
-    - Assumes X_train, X_val, and X_pred have been sanitized for XGBoost compatibility.
+    - ceiling_index / floor_index / upside_index are standardized across ALL prediction
+      players (mean 100 / sd 15). upside_index is the magnitude of the positive parts of the
+      two indices, so it rewards spiking on EITHER axis (and both) without penalizing an
+      ordinary axis; because it is zero-inflated + right-skewed its median sits below 100.
+    - Assumes X_train, X_val, and X_pred share categorical encodings (sanitized/aligned
+      upstream) and that model was fit on the same feature set.
     """
     if id_cols is None:
         id_cols = ["player_id", "player_name_clean"]
 
-    # --- Combine train and validation sets ---
+    # --- Combine train and validation sets (the bootstrap universe) ---
     X_combined = pd.concat([X_train, X_val], axis=0)
     y_combined = pd.concat([y_train, y_val], axis=0)
 
-    # --- Recover ID columns from source_df using index alignment ---
-    for col in id_cols:
-        if col in source_df.columns:
-            X_combined[col] = source_df.loc[X_combined.index, col].values
-
-    # --- Validate group_col is present ---
-    if group_col not in X_combined.columns:
+    # --- Recover the player grouping column from source_df via index alignment ---
+    if group_col not in source_df.columns:
         raise ValueError(
-            f"OOB-by-player requires '{group_col}' to be present in source_df. "
-            f"Ensure source_df contains the column '{group_col}'."
+            f"Player-level bootstrap requires '{group_col}' in source_df."
         )
+    group_ids = source_df.loc[X_combined.index, group_col].to_numpy()
 
-    def _drop_ids(df: pd.DataFrame) -> pd.DataFrame:
-        return df.drop(columns=[c for c in id_cols if c in df.columns], errors="ignore")
+    X_tr = X_combined.reset_index(drop=True)
+    y_tr = y_combined.reset_index(drop=True)
+    n_pred = len(X_pred)
 
-    # --- Prepare matrices ---
-    X_tr = _drop_ids(X_combined).reset_index(drop=True)
-    X_p = _drop_ids(X_pred).reset_index(drop=True)
-    y_tr_full = y_combined.reset_index(drop=True)
-
-    # --- Params ---
+    # Params for the refits (same tuned hyperparameters as the point model)
     params = {
         "objective": model_objective,
         "eval_metric": metric,
@@ -706,84 +780,148 @@ def generate_prediction_intervals(
     }
     params.update(base_params or {})
 
-    # --- Out of Bag (OOB) grouping (player-level) ---
-    group_ids = X_combined[group_col].reset_index(drop=True).values
+    # Reuse the point model's tree count so refits mirror the full-data fit (no early stopping)
+    fixed_nrounds = model.get_booster().num_boosted_rounds()
+
+    # Center every band on the SAME full-data prediction carried onto the draft sheet
+    point_pred = model.predict(X_pred)
+
+    # Map each player to its row positions once (for fast row replication per iteration)
     unique_players = pd.unique(group_ids)
+    player_to_rows = {p: np.where(group_ids == p)[0] for p in unique_players}
 
-    # Guardrails
-    min_oob_rows = 200  # keep early stopping stable
-
-    preds_list: List[np.ndarray] = []
+    # --- Pass 1: cluster-bootstrap refits at a FIXED tree count (no early stopping) ---
+    # base_all[b] holds each refit's prediction-player predictions (epistemic spread); every
+    # iteration's OOB (fitted, residual) pairs accumulate into one global pool for the
+    # heteroscedastic aleatoric noise below.
+    base_all = np.full((n_bootstrap, n_pred), np.nan)
+    pool_fitted: List[np.ndarray] = []
+    pool_resid: List[np.ndarray] = []
 
     for b in tqdm(range(n_bootstrap), desc="Bootstrapping prediction intervals"):
         rng_b = np.random.default_rng(random_state + b)
 
-        # Sample players with replacement, then include all rows for sampled players
-        # TODO: Fix the bootstrapping methodology, conforming to a set makes bootstrapping redundant
+        # True player-level bootstrap: sample players WITH replacement, then replicate each
+        # drawn player's rows by its draw count (duplicates are the point of the bootstrap).
         boot_players = rng_b.choice(
             unique_players, size=len(unique_players), replace=True
         )
-        boot_set = set(boot_players)
+        draw_counts = pd.Series(boot_players).value_counts()
+        in_bag_idx = np.concatenate(
+            [np.tile(player_to_rows[p], count) for p, count in draw_counts.items()]
+        )
 
-        in_bag_mask = np.isin(group_ids, list(boot_set))
-        idx_boot = np.where(in_bag_mask)[0]
-        idx_oob = np.where(~in_bag_mask)[0]
+        # Out-of-bag players (never drawn) feed the honest global residual pool
+        drawn = set(boot_players.tolist())
+        oob_players = [p for p in unique_players if p not in drawn]
+        oob_idx = (
+            np.concatenate([player_to_rows[p] for p in oob_players])
+            if oob_players
+            else np.array([], dtype=int)
+        )
 
-        X_fit = X_tr.iloc[idx_boot]
-        y_fit = y_tr_full.iloc[idx_boot]
-
-        model = XGBRegressor(
-            n_estimators=n_estimators,
+        # Fit at the fixed tree count — no eval_set, so OOB rows stay unused for round
+        # selection and remain fully honest for the residual pool.
+        booster = XGBRegressor(
+            n_estimators=fixed_nrounds,
             random_state=random_state + b,
-            early_stopping_rounds=early_stopping_rounds,
             n_jobs=-1,
             **params,
         )
+        booster.fit(X_tr.iloc[in_bag_idx], y_tr.iloc[in_bag_idx], verbose=False)
 
-        # Use OOB players for early stopping when we have enough rows
-        use_oob = idx_oob.size >= min_oob_rows
-        if use_oob:
-            X_oob = X_tr.iloc[idx_oob]
-            y_oob = y_tr_full.iloc[idx_oob]
-            model.fit(X_fit, y_fit, eval_set=[(X_oob, y_oob)], verbose=False)
-        else:
-            # Fallback: fit without eval_set (early stopping won't activate)
-            model.fit(X_fit, y_fit, verbose=False)
+        base_all[b] = booster.predict(X_pred)
 
-        base_preds = model.predict(X_p)
+        if oob_idx.size > 0:
+            oob_preds = booster.predict(X_tr.iloc[oob_idx])
+            pool_fitted.append(oob_preds)
+            pool_resid.append(y_tr.iloc[oob_idx].to_numpy() - oob_preds)
 
-        # --- Add residual noise from OOB predictions to generate player prediction intervals ---
-        if use_oob:
-            oob_preds = model.predict(X_oob)
-            residuals = y_oob.values - oob_preds
-            residuals = residuals - residuals.mean()  # de-bias
-            noise = rng_b.choice(residuals, size=len(base_preds), replace=True)
-            preds = base_preds + noise
-        else:
-            preds = base_preds
+    # --- Global, fitted-value-binned residual pool (heteroscedastic aleatoric noise) ---
+    # Bin pooled OOB residuals by fitted value so a player draws noise sized to his own
+    # projection level; residuals are centered WITHIN each bin so noise is mean-zero per level.
+    g_fitted = np.concatenate(pool_fitted)
+    g_resid = np.concatenate(pool_resid)
 
-        preds_list.append(preds)
+    bin_breaks = np.unique(np.quantile(g_fitted, np.linspace(0, 1, n_resid_bins + 1)))
+    n_bins_eff = len(bin_breaks) - 1
+    interior_edges = bin_breaks[1:-1]
 
-    pred_mat = np.vstack(preds_list)  # (n_bootstrap, n_rows_pred)
+    def _assign_bins(values: np.ndarray) -> np.ndarray:
+        return np.clip(np.digitize(values, interior_edges), 0, n_bins_eff - 1)
+
+    g_bin = _assign_bins(g_fitted)
+    bin_residuals = [
+        (g_resid[g_bin == k] - g_resid[g_bin == k].mean())
+        if np.any(g_bin == k)
+        else np.array([])
+        for k in range(n_bins_eff)
+    ]
+    global_centered = g_resid - g_resid.mean()  # fallback for thin/empty bins
+    pred_bin = _assign_bins(point_pred)
+
+    # --- Pass 2: assemble the predictive sample per player ---
+    # final = point_pred + epistemic deviation (refit spread re-centered on point_pred) + binned noise
+    ensemble_mean = base_all.mean(axis=0)
+    n_samples = n_bootstrap * n_noise_draws
+    pred_mat = np.empty((n_samples, n_pred))
+
+    rng_noise = np.random.default_rng(random_state)  # reproducible noise for a given seed
+    for j in range(n_pred):
+        epi_dev = np.repeat(base_all[:, j] - ensemble_mean[j], n_noise_draws)
+        pool_j = bin_residuals[pred_bin[j]]
+        if pool_j.size < min_bin:
+            pool_j = global_centered
+        noise_j = (
+            rng_noise.choice(pool_j, size=n_samples, replace=True)
+            if pool_j.size
+            else 0.0
+        )
+        pred_mat[:, j] = point_pred[j] + epi_dev + noise_j
+
+    # --- Aggregate into per-player percentile bands (centered on point_pred) ---
+    pred_mean = pred_mat.mean(axis=0)
+    p05, p10, p50, p90, p95 = (
+        np.percentile(pred_mat, q, axis=0) for q in (5, 10, 50, 90, 95)
+    )
+
+    # Scale-free band edges relative to the projection (intermediates, dropped after indexing)
+    ceiling_room = np.where(pred_mean > 0, p95 / pred_mean, np.nan)
+    floor_share = np.where(pred_mean > 0, p05 / pred_mean, np.nan)
+
+    # Two level-neutral signals: level_adjust studentizes each ratio against the projection
+    # level (equalizing average AND spread), then index_100 standardizes to mean 100 / sd 15.
+    ceiling_index = index_100(level_adjust(ceiling_room, pred_mean))
+    floor_index = index_100(level_adjust(floor_share, pred_mean))
+
+    # Single sortable OR-score: rewarded for spiking on EITHER axis, never penalized for an
+    # ordinary (below-100) axis; re-standardized to 100 / 15.
+    upside_index = index_100(
+        np.sqrt(
+            np.maximum(ceiling_index - 100, 0) ** 2
+            + np.maximum(floor_index - 100, 0) ** 2
+        )
+    )
 
     out = pd.DataFrame(
         {
-            "pred_mean": pred_mat.mean(axis=0),
-            "pred_p10": np.percentile(pred_mat, 10, axis=0),
-            "pred_p50": np.percentile(pred_mat, 50, axis=0),
-            "pred_p90": np.percentile(pred_mat, 90, axis=0),
+            "pred_mean": pred_mean,
+            "pred_p05": p05,
+            "pred_p10": p10,
+            "pred_p50": p50,
+            "pred_p90": p90,
+            "pred_p95": p95,
+            "pred_width": p95 - p05,
+            "pred_upside": p95 - pred_mean,
+            "pred_downside": pred_mean - p05,
+            "ceiling_index": ceiling_index,
+            "floor_index": floor_index,
+            "upside_index": upside_index,
         },
         index=X_pred.index,
     )
 
-    downside_floor = 0.01 * out["pred_mean"].abs().clip(lower=1.0)  # 1% of mean
-
-    out["pred_width_80"] = out["pred_p90"] - out["pred_p10"]
-    out["pred_upside"] = out["pred_p90"] - out["pred_mean"]
-    out["pred_downside"] = out["pred_mean"] - out["pred_p10"]
-    out["implied_upside"] = out["pred_upside"] / (out["pred_downside"] + downside_floor)
-
-    # Prepend id columns from source_df for prediction rows
+    # Prepend id columns from source_df for the prediction rows
     id_present = [c for c in id_cols if c in source_df.columns]
     if id_present:
         ids = source_df.loc[X_pred.index, id_present].reset_index(drop=True)
