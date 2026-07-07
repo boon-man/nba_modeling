@@ -1,0 +1,30 @@
+[project]
+name = "nba-modeling"
+version = "0.1.0"
+description = "Predicts next-season NBA fantasy points and builds a fantasy draft board."
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.2.2",
+    "numpy>=1.26.4",
+    "scipy>=1.13.0",
+    "scikit-learn>=1.5.0",
+    "xgboost>=2.0.3",
+    "hyperopt>=0.2.7",
+    "plotnine>=0.13.6",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.3",
+    "lxml>=5.2.1",
+    "tqdm>=4.66.0",
+    "nba-api>=1.4.1",
+    "setuptools>=69.5.1,<81",  # provides pkg_resources (removed in setuptools 81), imported by hyperopt on Python 3.14+
+]
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.0",
+    "ipykernel>=6.29",
+]
+
+[tool.uv]
+# Flat-module project (config.py, data_io.py, ...); do not build/install it as a package.
+package = false
