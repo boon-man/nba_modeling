@@ -667,6 +667,7 @@ def generate_prediction_intervals(
         rng_b = np.random.default_rng(random_state + b)
 
         # Sample players with replacement, then include all rows for sampled players
+        # TODO: Fix the bootstrapping methodology, conforming to a set makes bootstrapping redundant
         boot_players = rng_b.choice(
             unique_players, size=len(unique_players), replace=True
         )
