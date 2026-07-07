@@ -90,8 +90,16 @@ row; `data_cleaning.keep_tot_or_first` collapses these to one row per player-sea
   combined, scaling `n_estimators` up by `n_estimators_mult` to compensate for the
   larger data.
 - **Categoricals**: XGBoost runs with `enable_categorical=True`. `sanitize_dtypes`
-  converts pandas `StringDtype` → object → `category` because XGBoost chokes on
-  `string[python]`-backed categories. Run new categorical columns through it.
+  converts pandas string/object columns → `category`. It is called **once** on the full
+  feature matrix inside `split_data_nba` *before* the train/val/test split — do not move it
+  after the split. Under pandas 3, concatenating two `category` columns with mismatched
+  category sets silently collapses them to a `str` dtype XGBoost rejects; sanitizing before
+  the split gives every split identical category sets so the downstream `pd.concat` calls
+  (baseline, final model, bootstrap) survive.
+- **Prediction categoricals**: `build_prediction_frame` must be passed `train_features=X_train`
+  so `align_categorical_dtypes` re-casts `X_pred`'s categoricals to the *training* category
+  sets. XGBoost 3.x errors on categories unseen during training; alignment maps them to `NaN`
+  (treated as missing). Omitting `train_features` reintroduces that error on the prediction path.
 - **Hyperparameters**: search space is `config.SPACE` (leaf-based / `lossguide` growth);
   tuning uses Hyperopt TPE. Random seeds are passed explicitly everywhere for
   reproducibility — keep them.

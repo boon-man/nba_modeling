@@ -50,6 +50,45 @@ def sanitize_dtypes(X: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def align_categorical_dtypes(
+    X: pd.DataFrame, reference: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Cast the categorical columns of ``X`` to match the CategoricalDtype of the same column
+    in ``reference`` (typically the training feature matrix).
+
+    Any value present in ``X`` but not in the reference's category set is mapped to NaN,
+    which XGBoost treats as missing. This prevents XGBoost 3.x from erroring on categories
+    that appear at prediction time but were never seen during training.
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Frame to align (e.g., the prediction feature matrix).
+    reference : pd.DataFrame
+        Frame whose categorical dtypes define the valid category sets (e.g., X_train).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of ``X`` with categorical columns re-cast to the reference category sets.
+
+    Notes
+    -----
+    - Only columns that are categorical in ``reference`` and present in ``X`` are touched;
+      all other columns (numeric, etc.) are left unchanged.
+    """
+    out = X.copy()
+
+    # Re-cast each categorical column to the training category set (unseen -> NaN)
+    reference_cat_cols = reference.select_dtypes(include=["category"]).columns
+    for c in reference_cat_cols:
+        if c in out.columns:
+            out[c] = out[c].astype(reference[c].dtype)
+
+    return out
+
+
 def split_data_nba(
     df: pd.DataFrame,
     pred_year: int,
@@ -84,7 +123,13 @@ def split_data_nba(
 
     cols_to_drop = set(drop_cols + [target_col])
     feature_cols = [c for c in df.columns if c not in cols_to_drop]
-    X = df[feature_cols]
+
+    # Sanitize dtypes once on the full matrix (not per-split) so every categorical column
+    # carries its complete category set. Row-slicing preserves the CategoricalDtype, so the
+    # train/val/test splits share identical categories and survive the pd.concat that the
+    # downstream model functions perform (under pandas 3, concatenating categoricals with
+    # mismatched category sets silently collapses them to a 'str' dtype XGBoost rejects).
+    X = sanitize_dtypes(df[feature_cols])
 
     # Train/Test split (test is pure holdout)
     X_train_full, X_test, y_train_full, y_test = train_test_split(
@@ -95,11 +140,6 @@ def split_data_nba(
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_full, y_train_full, test_size=val_size, random_state=random_state
     )
-
-    # Sanitize dtypes for XGBoost compatibility
-    X_train = sanitize_dtypes(X_train)
-    X_val = sanitize_dtypes(X_val)
-    X_test = sanitize_dtypes(X_test)
 
     return X_train, X_val, X_test, y_train, y_val, y_test, feature_cols
 
@@ -489,6 +529,7 @@ def build_prediction_frame(
     pred_year: int,
     feature_cols: List[str],
     drop_cols: List[str] = None,
+    train_features: pd.DataFrame = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Build the prediction dataframe and feature matrix for making future predictions.
@@ -503,6 +544,10 @@ def build_prediction_frame(
         List of feature column names to use for prediction.
     drop_cols : List[str], optional
         Columns to drop from the prediction dataframe (default: ["player_name_clean", "player_id", "season"]).
+    train_features : pd.DataFrame, optional
+        Training feature matrix (e.g., X_train from split_data_nba). When provided, X_pred's
+        categorical columns are cast to the training category sets so that categories unseen
+        during training map to NaN. Required for XGBoost 3.x, which errors on unseen categories.
 
     Returns
     -------
@@ -515,6 +560,8 @@ def build_prediction_frame(
     -----
     - Raises ValueError if any feature in feature_cols is missing from df_pred.
     - drop_cols is not used for filtering features, but can be used for downstream processing if needed.
+    - When train_features is omitted, X_pred keeps its own categorical encodings, which can
+      trip XGBoost 3.x if the prediction season introduces categories unseen in training.
     """
     df = df.copy()
 
@@ -534,6 +581,11 @@ def build_prediction_frame(
         raise ValueError(f"Missing feature columns in prediction frame: {missing}")
 
     X_pred = df_pred[feature_cols]
+
+    # Align categoricals to the training category sets so pred-season-only categories
+    # (never seen in training) become NaN rather than tripping XGBoost 3.x.
+    if train_features is not None:
+        X_pred = align_categorical_dtypes(X_pred, train_features)
 
     return df_pred, X_pred
 
