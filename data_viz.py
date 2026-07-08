@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import re
+from sklearn.cluster import KMeans
 from plotnine import (
     ggplot,
     aes,
@@ -519,3 +520,49 @@ def plot_decile_calib(results, color_palette):
         + theme(figure_size=(10, 5), panel_grid_minor=element_blank())
     )
     return p_decile_calib
+
+
+def plot_elbow(
+    data,
+    color_palette,
+    value_col="relative_value",
+    min_k=3,
+    max_k=10,
+    random_state=42,
+):
+    """
+    Elbow plot (within-cluster sum of squares vs. K) for choosing the KMeans cluster
+    count used in value tiering.
+
+    Args:
+        data (pd.DataFrame): DataFrame containing value_col.
+        color_palette (list): List of color hex codes.
+        value_col (str): Column clustered on (default "relative_value").
+        min_k (int): Smallest K to plot. Defaults to 3 because K=1-2 have inflated WSS
+            that flattens the rest of the curve.
+        max_k (int): Largest K to plot.
+        random_state (int): KMeans seed.
+
+    Returns:
+        plotnine.ggplot: The constructed elbow plot.
+    """
+    X = data[[value_col]]
+    ks = list(range(min_k, max_k + 1))
+    wss = [
+        KMeans(n_clusters=k, random_state=random_state, n_init=10).fit(X).inertia_
+        for k in ks
+    ]
+    elbow_df = pd.DataFrame({"k": ks, "wss": wss})
+
+    p_elbow = (
+        ggplot(elbow_df, aes(x="k", y="wss"))
+        + geom_line(color=color_palette[0], size=0.8)
+        + geom_point(color=color_palette[0], size=2.5)
+        + labs(
+            title="Elbow Plot for Optimal K",
+            x="Number of Clusters (K)",
+            y="Within-Cluster Sum of Squares",
+        )
+        + theme_nba()
+    )
+    return p_elbow

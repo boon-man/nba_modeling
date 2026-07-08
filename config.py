@@ -31,7 +31,7 @@ B_SPLIT = 0.2
 
 
 # Defining URL for pulling NBA projections
-FANTASYPROS_URL = "https://www.fantasypros.com/nba/stats/overall.php"
+FANTASYPROS_URL = "https://www.fantasypros.com/nba/projections/overall.php"
 
 # =============================================================================
 # Model Hyperparameter Space

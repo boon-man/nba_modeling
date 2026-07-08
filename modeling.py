@@ -3,6 +3,7 @@ import pandas as pd
 from typing import List, Tuple
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import spearmanr
 from xgboost import XGBRegressor
@@ -929,3 +930,100 @@ def generate_prediction_intervals(
         out.index = X_pred.index
 
     return out
+
+
+def segment_players(
+    df: pd.DataFrame,
+    k: int,
+    value_col: str = "relative_value",
+    tier_col: str = "player_value_tier",
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Bucket players into k value tiers via KMeans on a single value column.
+
+    KMeans cluster labels are arbitrary, so they are re-mapped by descending cluster-mean
+    value: tier 1 is the highest-value group, tier 2 the next, and so on.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Player rows containing value_col.
+    k : int
+        Number of tiers. Clamped to the row count if larger (KMeans needs k <= n_samples).
+    value_col : str, default "relative_value"
+        Column clustered on.
+    tier_col : str, default "player_value_tier"
+        Name of the output tier column.
+    random_state : int, default 42
+        KMeans seed for reproducible tiers.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of df with an added integer tier_col (1 = highest value).
+    """
+    out = df.copy()
+    k = min(k, len(out))
+
+    labels = KMeans(n_clusters=k, random_state=random_state, n_init=10).fit_predict(
+        out[[value_col]]
+    )
+    out["_raw_segment"] = labels
+
+    # Re-label clusters by descending mean value so tier 1 = highest value
+    ordered = out.groupby("_raw_segment")[value_col].mean().sort_values(ascending=False)
+    mapping = {old: new + 1 for new, old in enumerate(ordered.index)}
+    out[tier_col] = out["_raw_segment"].map(mapping)
+
+    return out.drop(columns="_raw_segment")
+
+
+def segment_players_by_group(
+    df: pd.DataFrame,
+    k_by_group: dict,
+    group_col: str = "position_group",
+    value_col: str = "relative_value",
+    tier_col: str = "position_value_tier",
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Apply `segment_players` within each position group, using a per-group value of k.
+
+    Tiers are relabeled 1 = highest value *within* each group, so a tier-1 guard and a
+    tier-1 center are each the top of their own positional pool.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Player rows containing group_col and value_col.
+    k_by_group : dict
+        Mapping of group value -> number of tiers, e.g. {"G": 8, "W": 8, "B": 5}.
+    group_col : str, default "position_group"
+        Column defining the groups.
+    value_col : str, default "relative_value"
+        Column clustered on.
+    tier_col : str, default "position_value_tier"
+        Name of the output tier column.
+    random_state : int, default 42
+        KMeans seed for reproducible tiers.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of df with an added integer tier_col, in the original row order.
+    """
+    # Segment each position group on its own value distribution with its own k
+    segments = [
+        segment_players(
+            group_df,
+            k=k_by_group[group],
+            value_col=value_col,
+            tier_col=tier_col,
+            random_state=random_state,
+        )
+        for group, group_df in df.groupby(group_col)
+    ]
+
+    # Recombine and restore the original row order
+    return pd.concat(segments).loc[df.index]
