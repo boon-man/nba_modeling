@@ -33,6 +33,12 @@ There is no test suite, linter config, or build step. The notebook *is* the runn
 `setuptools>=81`. `setuptools` is therefore pinned `<81` in `pyproject.toml`; don't
 loosen that bound or `import hyperopt` (and thus `config.py`) will fail on Python 3.14.
 
+**Pandas 3 string dtype:** `config.py` sets `pd.set_option("future.infer_string", False)`
+on import. Pandas 3.0 defaults text columns to the new `str` dtype, which the Positron Data
+Explorer can't apply text filters to (filters silently no-op); reverting to classic `object`
+keeps the viewer usable. Don't remove it unless the workflow moves off Positron. It's set in
+`config.py` so it applies before any DataFrame is built, in the notebook or a script.
+
 ## Data flow (the big picture)
 
 The pipeline is a linear sequence, each stage consuming the previous stage's DataFrame:

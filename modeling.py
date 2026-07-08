@@ -592,6 +592,49 @@ def build_prediction_frame(
     return df_pred, X_pred
 
 
+def apply_availability_adjustment(
+    df: pd.DataFrame,
+    adjustments: dict,
+    pred_col: str = "predicted_fantasy_points",
+    name_col: str = "player_name_clean",
+) -> pd.DataFrame:
+    """
+    Manually scale predictions for players expected to miss games (injury, suspension, etc.)
+    that the model cannot know about from historical stats.
+
+    Each listed player's prediction is multiplied by an availability factor; players absent
+    from ``adjustments`` are left unchanged (factor 1.0). Warns about any adjustment key that
+    matches no player, which usually means a misspelled or un-cleaned name.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Prediction frame containing name_col and pred_col.
+    adjustments : dict
+        Mapping of player name (matching name_col) -> multiplier, where 1.0 = full season,
+        0.5 = roughly half a season, 0.0 = out for the year.
+    pred_col : str, default "predicted_fantasy_points"
+        Prediction column to scale.
+    name_col : str, default "player_name_clean"
+        Column holding the player key the adjustments are matched on.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of df with pred_col scaled by each player's factor.
+    """
+    out = df.copy()
+
+    # Flag adjustment names that don't match any player (typo / wrong name format)
+    unmatched = set(adjustments) - set(out[name_col])
+    if unmatched:
+        print(f"[availability adjustment] no player match for: {sorted(unmatched)}")
+
+    factors = out[name_col].map(adjustments).fillna(1.0)
+    out[pred_col] = out[pred_col] * factors
+    return out
+
+
 def index_100(x: np.ndarray) -> np.ndarray:
     """
     Standardize a vector to mean 100 / sd 15 (IQ / wRC+-style). Returns a flat 100 if the
