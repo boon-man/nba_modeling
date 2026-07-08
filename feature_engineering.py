@@ -388,25 +388,40 @@ def parse_awards_cell(cell: str) -> dict:
 
 
 # Creating a function to assign fantasy points scored in a season
-def calculate_fantasy_points(df: pd.DataFrame) -> pd.DataFrame:
+def score_fantasy_points(df: pd.DataFrame, scoring_map: dict) -> pd.Series:
     """
-    Calculate total fantasy points & rank players for each player-season based
-    on standard Underdog Fantasy scoring.
+    Compute fantasy points as a weighted sum of per-stat columns.
+
+    Parameters:
+        df (pd.DataFrame): DataFrame containing every stat column named in scoring_map.
+        scoring_map (dict): Mapping of stat column name -> point weight
+            (e.g. config.SCORING_MAPS["UD"]).
+
+    Returns:
+        pd.Series: Fantasy points per row.
+    """
+    total = pd.Series(0.0, index=df.index)
+    for col, weight in scoring_map.items():
+        total = total + df[col] * weight
+    return total
+
+
+def calculate_fantasy_points(df: pd.DataFrame, scoring_map: dict) -> pd.DataFrame:
+    """
+    Calculate total fantasy points & rank players for each player-season based on the
+    provided scoring map (e.g. config.SCORING_MAPS["UD"]).
 
     Parameters:
         df (pd.DataFrame): DataFrame containing player stats.
+        scoring_map (dict): Mapping of stat column name -> point weight. Lets the target
+            follow whatever league scoring format is selected in run_model.ipynb.
 
     Returns:
-        pd.DataFrame: DataFrame with an additional 'fantasy_points' column.
+        pd.DataFrame: DataFrame with added 'fantasy_points', 'fantasy_points_pct', and
+        'fpts_per_min' columns.
     """
-    df["fantasy_points"] = (
-        df["pts"] * 1
-        + df["reb"] * 1.2
-        + df["ast"] * 1.5
-        + df["stl"] * 3
-        + df["blk"] * 3
-        - df["tov"] * 1
-    )
+    df["fantasy_points"] = score_fantasy_points(df, scoring_map)
+
     # Ranking players by fantasy points within each season (percentile rank)
     df["fantasy_points_pct"] = (
         df.groupby("year")["fantasy_points"]

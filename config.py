@@ -34,6 +34,25 @@ B_SPLIT = 0.2
 FANTASYPROS_URL = "https://www.fantasypros.com/nba/projections/overall.php"
 
 # =============================================================================
+# Fantasy Scoring Maps
+# =============================================================================
+# Per-stat point weights keyed by DataFrame stat-column names. Pick a map at the top of
+# run_model.ipynb and pass it to calculate_fantasy_points() (the model target) and
+# prepare_fantasypros_df() (projected_fantasy_points). Keys must match the stat columns in
+# both data sources; turnovers are normalized to 'tov' so one map serves both.
+SCORING_MAPS = {
+    # Underdog Fantasy
+    "UD": {
+        "pts": 1.0,
+        "reb": 1.2,
+        "ast": 1.5,
+        "stl": 3.0,
+        "blk": 3.0,
+        "tov": -1.0,
+    },
+}
+
+# =============================================================================
 # Model Hyperparameter Space
 # =============================================================================
 # Define Hyperopt search space for final model tuning

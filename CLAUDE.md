@@ -48,14 +48,22 @@ The pipeline is a linear sequence, each stage consuming the previous stage's Dat
 3. **Merging** — `data_cleaning.merge_nba_dataframes` left-joins the two sources on
    `["player_name_clean", "year"]` into `combined_df`.
 4. **Target + features** — `feature_engineering.calculate_fantasy_points` creates the
-   `fantasy_points` target, then `feature_engineering.run_feature_pipeline` chains every
-   feature step and produces the modeling matrix.
+   `fantasy_points` target from a scoring map (`config.SCORING_MAPS`, e.g. `"UD"`; selected
+   as `SCORING_MAP` at the top of the notebook and reused for FantasyPros projections), then
+   `feature_engineering.run_feature_pipeline` chains every feature step and produces the
+   modeling matrix.
 5. **Modeling** — `modeling.split_data_nba` → `tune_xgb_nba` → `create_model_nba`, with
    `create_baseline_nba` as a reference point and `generate_prediction_intervals` for
    bootstrapped ranges.
 6. **Prediction + draft board** — predictions for `PRED_YEAR` are blended with scraped
    FantasyPros projections, assigned position groups, and ranked into a draft board.
    These later stages currently live as inline functions in the notebook (see TODOs).
+7. **Value tiering** — after `relative_value` is computed, players are bucketed into value
+   tiers by KMeans (elbow method to pick `k`): `modeling.segment_players` builds an overall
+   `player_value_tier` across all players, and `modeling.segment_players_by_group` builds a
+   `position_value_tier` within each `position_group` (per-group `k`). Both relabel clusters
+   so tier 1 = highest value. `data_viz.plot_elbow` renders the WSS-vs-`k` elbow (plotnine).
+   The final board carries both tiers.
 
 ## The two join keys that hold everything together
 
@@ -137,7 +145,5 @@ style when adding plots.
 
 ## Known TODOs (from notebook / commits)
 
-- Scoring format is hard-coded to Underdog Fantasy in `calculate_fantasy_points`; make it
-  league-configurable.
 - FantasyPros scraping and position-blending functions still live inline in the notebook
   and should be moved into `.py` modules.
