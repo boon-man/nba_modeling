@@ -569,6 +569,55 @@ def plot_elbow(
     return p_elbow
 
 
+def abbreviate_player_names(names):
+    """
+    Convert cleaned player names ("nikola jokic") to a compact "F. Lastname" display form
+    ("N. Jokic"). When two players in the same list share both first initial and last name,
+    the first-name prefix is lengthened just enough to disambiguate them (e.g. "Ja. Williams"
+    vs "Ju. Williams"). Disambiguation is scoped to the names passed in.
+
+    Args:
+        names (list[str]): Cleaned, lowercase player names.
+
+    Returns:
+        list[str]: Abbreviated display names, aligned to the input order.
+    """
+    from collections import defaultdict
+
+    def split_name(name):
+        parts = name.split()
+        if len(parts) < 2:
+            return "", name  # single token -> treat whole as last name
+        return parts[0], " ".join(parts[1:])
+
+    firsts, lasts = [], []
+    for name in names:
+        first, last = split_name(name)
+        firsts.append(first)
+        lasts.append(last)
+
+    # Group by last name so collisions are only resolved among true clashes
+    groups = defaultdict(list)
+    for i, last in enumerate(lasts):
+        groups[last].append(i)
+
+    labels = [None] * len(names)
+    for last, idxs in groups.items():
+        last_title = last.title()
+        for i in idxs:
+            first = firsts[i]
+            if not first:
+                labels[i] = last_title
+                continue
+            # Shortest first-name prefix unique among same-last-name players (>=1 letter)
+            others = [firsts[j] for j in idxs if j != i]
+            k = 1
+            while k < len(first) and any(o[:k] == first[:k] for o in others):
+                k += 1
+            labels[i] = f"{first[:k].capitalize()}. {last_title}"
+    return labels
+
+
 def plot_pred_vs_proj_dumbbell(projection_df, color_palette, position_group="G", top_n=30):
     """
     Dumbbell chart comparing the model prediction against the FantasyPros projection for the
@@ -605,7 +654,7 @@ def plot_pred_vs_proj_dumbbell(projection_df, color_palette, position_group="G",
     n_players = len(ranked)
     ranked["y_pos"] = np.arange(n_players, 0, -1)  # first (best) row -> top
     y_breaks = ranked["y_pos"].tolist()
-    y_labels = ranked["player_name_clean"].tolist()
+    y_labels = abbreviate_player_names(ranked["player_name_clean"].tolist())
 
     # Long form drives the two colored dots; the wide ranked frame anchors the connector endpoints
     points_long = ranked.melt(
@@ -644,7 +693,7 @@ def plot_pred_vs_proj_dumbbell(projection_df, color_palette, position_group="G",
             linetype="dashed",
             color="#00000F",
             size=0.4,
-            alpha=0.25,
+            alpha=0.4,
         )
         # Connector between the model and expert estimate for each player
         + geom_segment(
@@ -656,13 +705,13 @@ def plot_pred_vs_proj_dumbbell(projection_df, color_palette, position_group="G",
                 xend="projected_fantasy_points",
             ),
             color="#C2C2C2",
-            size=1,
+            size=1.75,
         )
         # The two estimate dots, colored by source
         + geom_point(
             points_long,
             aes(y="y_pos", x="points", color="source"),
-            size=3,
+            size=5,
         )
         # Black diamond marking the blended final_projection (plain marker, no legend entry)
         + geom_point(
@@ -674,21 +723,25 @@ def plot_pred_vs_proj_dumbbell(projection_df, color_palette, position_group="G",
         )
         + scale_color_manual(
             values={"Model": color_palette[0], "FantasyPros": color_palette[2]},
-            labels=["Model Prediction", "FantasyPros Projection"],
+            labels=["Model Prediction", "Expert Projection"],
         )
         + scale_x_continuous(
             breaks=major_breaks, minor_breaks=minor_breaks, limits=(x_lower, x_upper)
         )
         + scale_y_continuous(breaks=y_breaks, labels=y_labels)
         + labs(
-            title=f"Model vs FantasyPros — Top {top_n} {position_group}",
+            title=f"Model vs Expert — Top {top_n} {position_group}",
             x="Projected Fantasy Points",
             y=None,
         )
         + theme_nba()
         + theme(
             figure_size=(16, 10),
-            dpi=200,
+            dpi=250,
+            plot_title=element_text(size=24, weight="bold"),
+            axis_title=element_text(size=18),
+            axis_text=element_text(size=16),
+            legend_text=element_text(size=16),
             legend_position="top",
             legend_title=element_blank(),
             axis_title_y=element_blank(),
