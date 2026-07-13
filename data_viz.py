@@ -24,6 +24,7 @@ from plotnine import (
     scale_x_continuous,
     scale_y_continuous,
     scale_y_reverse,
+    scale_color_manual,
     geom_hline,
     geom_histogram,
     geom_boxplot,
@@ -566,3 +567,133 @@ def plot_elbow(
         + theme_nba()
     )
     return p_elbow
+
+
+def plot_pred_vs_proj_dumbbell(projection_df, color_palette, position_group="G", top_n=30):
+    """
+    Dumbbell chart comparing the model prediction against the FantasyPros projection for the
+    top_n players in a position group (ranked by the blended final_projection). Each player is
+    a row with two dots - model vs expert - joined by a connector, so the gap between the two
+    reads at a glance. A black diamond marks the blended final_projection between them.
+
+    Args:
+        projection_df (pd.DataFrame): Blended frame (e.g. blended_df) with 'player_name_clean',
+            'position_group', 'predicted_fantasy_points', 'projected_fantasy_points', and
+            'final_projection'.
+        color_palette (list): List of color hex codes (model uses index 0, FantasyPros index 2).
+        position_group (str): Position group to plot ("G", "W", or "B").
+        top_n (int): Number of players to show, taken from the top of the final_projection ranking.
+
+    Returns:
+        plotnine.ggplot: The constructed dumbbell plot.
+    """
+    # Rank the position group by the blended projection and keep the top N players
+    ranked = (
+        projection_df[
+            (projection_df["position_group"] == position_group)
+            & projection_df["predicted_fantasy_points"].notna()
+            & projection_df["projected_fantasy_points"].notna()
+        ]
+        .sort_values("final_projection", ascending=False)
+        .head(top_n)
+        .copy()
+    )
+
+    # Assign explicit numeric y positions (highest projection on top). A numeric y axis lets the
+    # dashed separators (geom_hline) coexist with the dots/connectors, which plotnine forbids on a
+    # discrete axis; we relabel the axis with player names via scale_y_continuous below.
+    n_players = len(ranked)
+    ranked["y_pos"] = np.arange(n_players, 0, -1)  # first (best) row -> top
+    y_breaks = ranked["y_pos"].tolist()
+    y_labels = ranked["player_name_clean"].tolist()
+
+    # Long form drives the two colored dots; the wide ranked frame anchors the connector endpoints
+    points_long = ranked.melt(
+        id_vars="y_pos",
+        value_vars=["predicted_fantasy_points", "projected_fantasy_points"],
+        var_name="source",
+        value_name="points",
+    )
+    source_labels = {
+        "predicted_fantasy_points": "Model",
+        "projected_fantasy_points": "FantasyPros",
+    }
+    points_long["source"] = pd.Categorical(
+        points_long["source"].map(source_labels),
+        categories=["Model", "FantasyPros"],
+        ordered=True,
+    )
+
+    # Dashed horizontal separators every 5 players, counted from the top of the ranking; drawn at
+    # the .5 boundary between each block of 5.
+    separators = [n_players - k + 0.5 for k in np.arange(5, n_players, 5)]
+
+    # x-axis scaled to NBA season fantasy-point totals (~1,000-4,600), not the R 0-1000. Start at
+    # the low end of the data (floored to 250) rather than 0 so the names don't sit far left of the
+    # dumbbells; major gridlines stay on clean 500s that fall within range.
+    both_cols = ranked[["predicted_fantasy_points", "projected_fantasy_points"]]
+    x_lower = int(np.floor(both_cols.min().min() / 250.0) * 250)
+    x_upper = int(np.ceil(both_cols.max().max() / 250.0) * 250)
+    major_breaks = [b for b in range(0, x_upper + 1, 500) if b >= x_lower]
+    minor_breaks = [b for b in range(0, x_upper + 1, 250) if b >= x_lower]
+
+    p_dumbbell = (
+        ggplot()
+        + geom_hline(
+            yintercept=separators,
+            linetype="dashed",
+            color="#00000F",
+            size=0.4,
+            alpha=0.25,
+        )
+        # Connector between the model and expert estimate for each player
+        + geom_segment(
+            ranked,
+            aes(
+                y="y_pos",
+                yend="y_pos",
+                x="predicted_fantasy_points",
+                xend="projected_fantasy_points",
+            ),
+            color="#C2C2C2",
+            size=1,
+        )
+        # The two estimate dots, colored by source
+        + geom_point(
+            points_long,
+            aes(y="y_pos", x="points", color="source"),
+            size=3,
+        )
+        # Black diamond marking the blended final_projection (plain marker, no legend entry)
+        + geom_point(
+            ranked,
+            aes(y="y_pos", x="final_projection"),
+            shape="D",
+            color="#000000",
+            size=1,
+        )
+        + scale_color_manual(
+            values={"Model": color_palette[0], "FantasyPros": color_palette[2]},
+            labels=["Model Prediction", "FantasyPros Projection"],
+        )
+        + scale_x_continuous(
+            breaks=major_breaks, minor_breaks=minor_breaks, limits=(x_lower, x_upper)
+        )
+        + scale_y_continuous(breaks=y_breaks, labels=y_labels)
+        + labs(
+            title=f"Model vs FantasyPros — Top {top_n} {position_group}",
+            x="Projected Fantasy Points",
+            y=None,
+        )
+        + theme_nba()
+        + theme(
+            figure_size=(16, 10),
+            dpi=200,
+            legend_position="top",
+            legend_title=element_blank(),
+            axis_title_y=element_blank(),
+            panel_grid_major_y=element_blank(),
+            panel_grid_minor_y=element_blank(),
+        )
+    )
+    return p_dumbbell
