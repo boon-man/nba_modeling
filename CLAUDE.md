@@ -149,6 +149,17 @@ hard-coding them in modules or the notebook.
 `theme_nba()` and `COLOR_PALETTE`. Follow the existing layered `geom_*`/`aes()`/`labs()`
 style when adding plots.
 
+**Two deliberate Plotly exceptions:** `plot_positional_tiers` and `plot_model_vs_expert`
+(the final-step tier/rank diagnostics) are built with **Plotly**, not plotnine, because they
+need hover-to-identify-player to be legible (10-14 tier colors + a label per point). They
+return a `plotly.graph_objects.Figure` and color tiers with a MetBrewer "Hiroshige" ramp
+(`config.HIROSHIGE_COLORS`) interpolated to the tier count via `data_viz.tier_palette()`
+(mizani's `gradient_n_pal`, which ships with plotnine). Everything else stays plotnine.
+
+**Positron display gotcha:** tall/inline plotnine figures should be shown with `display(fig)`,
+not `fig.show()` — `.show()` routes to Positron's fixed-size Plots pane and crops them (see
+`plot_pred_vs_proj_dumbbell` usage). Plotly figures render fine inline via `.show()`.
+
 ## Known TODOs (from notebook / commits)
 
 - FantasyPros scraping and position-blending functions still live inline in the notebook

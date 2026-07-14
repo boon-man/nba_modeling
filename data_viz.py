@@ -1,7 +1,12 @@
 import pandas as pd
 import numpy as np
 import re
+import plotly.express as px
+import plotly.graph_objects as go
+from mizani.palettes import gradient_n_pal
 from sklearn.cluster import KMeans
+
+from config import HIROSHIGE_COLORS
 from plotnine import (
     ggplot,
     aes,
@@ -750,3 +755,282 @@ def plot_pred_vs_proj_dumbbell(projection_df, color_palette, position_group="G",
         )
     )
     return p_dumbbell
+
+
+# =============================================================================
+# Interactive tier / rank diagnostics (Plotly)
+# =============================================================================
+# These two run as the final step, after players carry value tiers. They are the only Plotly
+# plots in the repo (every other plot is plotnine): with ~10-14 tier colors and a label per
+# point, static versions are unreadable, so hover-to-see-player-name is what makes them useful.
+
+
+def tier_palette(n):
+    """
+    Interpolate n hex colors across the MetBrewer "Hiroshige" ramp (config.HIROSHIGE_COLORS).
+
+    Tier 1 (highest value) maps to the first (warm) color, the last tier to the final (cool)
+    color, matching the R port. Uses mizani's gradient palette (ships with plotnine).
+
+    Args:
+        n (int): Number of tiers / colors to produce.
+
+    Returns:
+        list[str]: n interpolated hex color strings.
+    """
+    if n < 1:
+        return []
+    return gradient_n_pal(HIROSHIGE_COLORS)(list(np.linspace(0, 1, n)))
+
+
+# Friendly position-group names for plot titles
+POSITION_GROUP_NAMES = {"G": "Guard", "W": "Wing", "B": "Big"}
+
+
+def _plotly_layout(title, x_title, y_title=None):
+    """Shared Plotly layout echoing theme_nba() (serif, white background, sized fonts, no legend)."""
+    return dict(
+        title=dict(text=title, font=dict(size=22, color="#262626")),
+        xaxis=dict(
+            title=dict(text=x_title, font=dict(size=16)), tickfont=dict(size=15)
+        ),
+        yaxis=dict(
+            title=dict(text=y_title or "", font=dict(size=16)), tickfont=dict(size=15)
+        ),
+        showlegend=False,
+        template="plotly_white",
+        font=dict(family="serif", size=14, color="#262626"),
+        width=1000,
+        height=700,
+    )
+
+
+def _style_hover(fig, color_map):
+    """Give each tier trace a white tooltip card with tier-colored border + text."""
+    for tr in fig.data:
+        hexc = color_map.get(tr.name)
+        tr.update(
+            hovertemplate="%{customdata[0]}<extra></extra>",
+            hoverlabel=dict(
+                bgcolor="white",
+                bordercolor=hexc,
+                font=dict(color=hexc, family="serif", size=13),
+            ),
+        )
+
+
+def plot_positional_tiers(player_df, position_group="G", top_n=None):
+    """
+    Interactive tier structure for one position group: each player is plotted at their
+    positional rank (x) against blended final_projection (y), colored by position_value_tier,
+    so tier breaks read as bands down the projection curve. The highest-projected player in each
+    tier is labeled to anchor where the tier begins; every other name surfaces on hover.
+
+    Args:
+        player_df (pd.DataFrame): Tiered frame (e.g. value_df) with 'position_group',
+            'position_rank', 'final_projection', 'position_value_tier', 'player_name_clean', 'pos'.
+        position_group (str): Position group to plot ("G", "W", or "B").
+        top_n (int, optional): If given, keep only the top_n by positional rank.
+
+    Returns:
+        plotly.graph_objects.Figure: The interactive tier plot.
+    """
+    pos_df = (
+        player_df[player_df["position_group"] == position_group]
+        .sort_values("position_rank")
+        .copy()
+    )
+    if top_n is not None:
+        pos_df = pos_df.head(top_n)
+
+    # Tiers as ordered string categories, each mapped to a Hiroshige color (tier 1 = warm)
+    tiers = sorted(pos_df["position_value_tier"].unique())
+    color_map = {str(t): c for t, c in zip(tiers, tier_palette(len(tiers)))}
+    pos_df["tier"] = pos_df["position_value_tier"].astype(str)
+    pos_df["player_label"] = pos_df["player_name_clean"].str.title()
+    pos_df["hover_text"] = (
+        "<b>" + pos_df["player_label"] + " - " + pos_df["pos"].astype(str) + "</b><br>"
+        + "Pos rank " + pos_df["position_rank"].astype(str) + " · Tier " + pos_df["tier"] + "<br>"
+        + "Projection " + pos_df["final_projection"].round(0).astype(int).astype(str)
+    )
+
+    fig = px.scatter(
+        pos_df,
+        x="position_rank",
+        y="final_projection",
+        color="tier",
+        category_orders={"tier": [str(t) for t in tiers]},
+        color_discrete_map=color_map,
+        custom_data=["hover_text"],
+    )
+    # Larger markers with a faint white outline so points read cleanly (static hover highlight)
+    fig.update_traces(
+        marker=dict(size=11, opacity=0.9, line=dict(width=0.6, color="white"))
+    )
+    _style_hover(fig, color_map)
+
+    # Label the highest-projected player in each tier (tier leader), colored to its tier
+    leaders = pos_df.loc[
+        pos_df.groupby("position_value_tier")["final_projection"].idxmax()
+    ]
+    for _, row in leaders.iterrows():
+        hexc = color_map[row["tier"]]
+        fig.add_annotation(
+            x=row["position_rank"],
+            y=row["final_projection"],
+            text=row["player_label"],
+            showarrow=True,
+            arrowhead=0,
+            arrowwidth=0.5,
+            arrowcolor=hexc,
+            ax=20,
+            ay=-10,
+            xanchor="left",
+            font=dict(size=12, color=hexc),
+        )
+
+    fig.update_layout(
+        **_plotly_layout(
+            title=f"{POSITION_GROUP_NAMES.get(position_group, position_group)} Projected Value Tiers",
+            x_title="Positional Ranking",
+            y_title=None,
+        )
+    )
+    return fig
+
+
+def plot_model_vs_expert(
+    player_df,
+    position_group=None,
+    n_label=10,
+    final_pred=True,
+    gate_labels_to_replacement=True,
+):
+    """
+    Interactive scatter of each player's model positional rank (x) against their FantasyPros
+    expert positional rank (y), colored by tier. Ranks (1 = best) are used instead of raw
+    projections so huge point totals don't stretch the plot. Both axes are reversed so the best
+    players sit top-right; a dashed line marks agreement. Points toward the top-left are ranked
+    better by the experts (expert favored); points toward the bottom-right are the model's
+    relative sleepers (model favored). The n_label biggest rank disagreements are named.
+
+    Args:
+        player_df (pd.DataFrame): Tiered frame (e.g. value_df) with 'position_group',
+            'predicted_fantasy_points', 'projected_fantasy_points', 'final_projection',
+            'player_value_tier', 'position_value_tier', 'player_name_clean', 'pos', and
+            (optionally) 'replacement_value'.
+        position_group (str, optional): Focus on one group (colors then use position_value_tier);
+            None plots the whole board (colors use the overall player_value_tier).
+        n_label (int): Number of largest model-vs-expert disagreements to label.
+        final_pred (bool): Model axis ranks by blended final_projection when True, else by the
+            pure predicted_fantasy_points (pre-blend).
+        gate_labels_to_replacement (bool): When True and 'replacement_value' is present, restrict
+            the labeled outliers to players at/above their position's replacement level.
+
+    Returns:
+        plotly.graph_objects.Figure: The interactive model-vs-expert rank plot.
+    """
+    model_label = "Final" if final_pred else "Model"
+
+    df = player_df.copy()
+    if position_group is not None:
+        df = df[df["position_group"] == position_group]
+    df = df[
+        df["predicted_fantasy_points"].notna() & df["projected_fantasy_points"].notna()
+    ].copy()
+
+    # Color by positional tier when focused, otherwise the overall tier
+    tier_col = "player_value_tier" if position_group is None else "position_value_tier"
+    tiers = sorted(df[tier_col].unique())
+    color_map = {str(t): c for t, c in zip(tiers, tier_palette(len(tiers)))}
+
+    # Rank within position group (1 = best) by each estimate, then measure the gap between them
+    model_col = "final_projection" if final_pred else "predicted_fantasy_points"
+    grouped = df.groupby("position_group")
+    df["model_rank"] = grouped[model_col].rank(method="dense", ascending=False).astype(int)
+    df["expert_rank"] = (
+        grouped["projected_fantasy_points"].rank(method="dense", ascending=False).astype(int)
+    )
+    df["rank_diff"] = df["model_rank"] - df["expert_rank"]  # + = expert ranks better (lower)
+    df["rank_gap"] = df["rank_diff"].abs()
+    df["tier"] = df[tier_col].astype(str)
+    df["player_label"] = df["player_name_clean"].str.title()
+    favored = np.where(df["rank_diff"] >= 0, "Expert +", "Model +")
+    df["gap_note"] = favored + df["rank_gap"].astype(str) + " spots"
+    df["hover_text"] = (
+        "<b>" + df["player_label"] + " — " + df["pos"].astype(str) + "</b><br>"
+        + f"{model_label} rank " + df["model_rank"].astype(str)
+        + " · Expert rank " + df["expert_rank"].astype(str) + "<br>"
+        + df["gap_note"]
+    )
+
+    fig = px.scatter(
+        df,
+        x="model_rank",
+        y="expert_rank",
+        color="tier",
+        category_orders={"tier": [str(t) for t in tiers]},
+        color_discrete_map=color_map,
+        custom_data=["hover_text"],
+    )
+    # Larger markers with a faint white outline so points read cleanly (static hover highlight)
+    fig.update_traces(
+        marker=dict(size=10, opacity=0.9, line=dict(width=0.6, color="white"))
+    )
+    _style_hover(fig, color_map)
+
+    # Agreement line: model rank == expert rank
+    max_rank = int(max(df["model_rank"].max(), df["expert_rank"].max()))
+    fig.add_shape(
+        type="line",
+        x0=1,
+        y0=1,
+        x1=max_rank,
+        y1=max_rank,
+        line=dict(color="#999999", width=1, dash="dash"),
+    )
+
+    # Label the biggest disagreements, gated to draftable players when replacement is available
+    label_pool = df
+    if gate_labels_to_replacement and "replacement_value" in df.columns:
+        label_pool = df[df["final_projection"] >= df["replacement_value"]]
+    for _, row in label_pool.nlargest(n_label, "rank_gap").iterrows():
+        hexc = color_map[row["tier"]]
+        fig.add_annotation(
+            x=row["model_rank"],
+            y=row["expert_rank"],
+            text=row["player_label"],
+            showarrow=True,
+            arrowhead=0,
+            arrowwidth=0.5,
+            arrowcolor=hexc,
+            ax=12,
+            ay=-12,
+            font=dict(size=12, color=hexc),
+        )
+
+    title = "Model vs Expert Positional Rank" + (
+        f" — {POSITION_GROUP_NAMES.get(position_group, position_group)}"
+        if position_group
+        else ""
+    )
+    fig.update_layout(
+        **_plotly_layout(
+            title=title,
+            x_title=f"{model_label} Positional Rank",
+            y_title="Expert Positional Rank",
+        )
+    )
+    # Reverse both axes so rank 1 (best) sits top-right; major gridlines every 10 ranks
+    fig.update_xaxes(autorange="reversed", dtick=10)
+    fig.update_yaxes(autorange="reversed", dtick=10)
+    # Corner cues (paper coords): experts better -> top-left, model better -> bottom-right
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.1, y=0.9, text="Expert Favored",
+        showarrow=False, font=dict(size=20, color="#595959"), opacity=0.6,
+    )
+    fig.add_annotation(
+        xref="paper", yref="paper", x=0.9, y=0.1, text="Model Favored",
+        showarrow=False, font=dict(size=20, color="#595959"), opacity=0.6,
+    )
+    return fig

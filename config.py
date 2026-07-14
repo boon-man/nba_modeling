@@ -307,3 +307,18 @@ COLOR_PALETTE = [
     "#fdd0a2",  # soft orange
     "#9ecae1",  # light blue
 ]
+
+# MetBrewer "Hiroshige" anchors, interpolated across a tier count for value-tier coloring
+# (warm -> cool ramp). Used by data_viz.tier_palette() for the interactive tier/rank plots.
+HIROSHIGE_COLORS = [
+    "#e76254",
+    "#ef8a47",
+    "#f7aa58",
+    "#ffd06f",
+    "#ffe6b7",
+    "#aadce0",
+    "#72bcd5",
+    "#528fad",
+    "#376795",
+    "#1e466e",
+]
